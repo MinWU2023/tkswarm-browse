@@ -205,7 +205,7 @@ gh run list --workflow=tkswarm-browses-release.yml --limit 3
 | 只出了 Artifacts 没有 Release | 是否用了 `workflow_dispatch` 而不是推 tag；或 Win/Mac 某一 job 失败 |
 | Mac 包打不出来 | `dist:mac` 必须在 macOS runner / 本机 Mac；不要在 Windows 上跑 |
 | tag 打错了 | `git push origin :refs/tags/browser-v错版` 删远端 tag 后重打（若已建 Release，先在网页删 Release） |
-| `tkswarm-browses/.github/workflows/release.yml` | 那是子目录模板，触发条件是 `v*`；**monorepo 以根目录 `browser-v*` 工作流为准** |
+| `tkswarm-browses/.github/workflows/release.yml` | **独立仓库** `tkswarm-browse` 用这份：tag `v*`，路径在仓库根（`package-lock.json` / `dist/`）。monorepo 仍以根目录 `browser-v*` 工作流为准 |
 
 ---
 

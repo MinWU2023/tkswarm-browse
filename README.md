@@ -71,11 +71,13 @@ npm run dist:mac    # macOS DMG + ZIP
 GitHub Release（需安装 [GitHub CLI](https://cli.github.com/) 并已 `gh auth login`）：
 
 ```bash
-git tag browser-v1.0.0
-git push origin browser-v1.0.0
+# 独立仓库 tkswarm-browse：tag 必须是 v*（如 v1.0.0）
+git tag -a v1.0.0 -m "v1.0.0"
+git push origin v1.0.0
 ```
 
-仓库根目录工作流 `.github/workflows/tkswarm-browses-release.yml` 会自动构建并 `gh release create` 上传产物。
+工作流 `.github/workflows/release.yml` 会构建 Win/Mac 并 `gh release create` 上传产物。  
+（若在 monorepo 根发版，改用 tag `browser-v*` + 根目录 `tkswarm-browses-release.yml`。）
 
 ## 数据目录
 
