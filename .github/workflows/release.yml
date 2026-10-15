@@ -59,6 +59,8 @@ jobs:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
+      # gh release create 需要仓库上下文（或 --repo）；仅 download-artifact 时没有 .git
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -66,8 +68,22 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            --title "TkSwarm Browser ${GITHUB_REF_NAME}" \
-            --notes "Windows EXE + macOS DMG/ZIP. 本地 API 默认 http://127.0.0.1:54345，与 tkswarm-node 比特接口兼容。" \
-            artifacts/TkSwarmBrowser-Windows/* \
-            artifacts/TkSwarmBrowser-macOS/*
+          set -euo pipefail
+          shopt -s nullglob
+          files=(artifacts/TkSwarmBrowser-Windows/* artifacts/TkSwarmBrowser-macOS/*)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No release artifacts found" >&2
+            ls -laR artifacts || true
+            exit 1
+          fi
+          echo "Uploading ${#files[@]} file(s):"
+          printf ' - %s\n' "${files[@]}"
+
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" "${files[@]}" --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "TkSwarm Browser ${GITHUB_REF_NAME}" \
+              --notes "Windows EXE + macOS DMG/ZIP. 本地 API 默认 http://127.0.0.1:54345，与 tkswarm-node 比特接口兼容。" \
+              "${files[@]}"
+          fi
