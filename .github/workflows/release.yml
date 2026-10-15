@@ -9,6 +9,10 @@ on:
 permissions:
   contents: write
 
+env:
+  # electron-builder 在 tag 下会尝试 publish；发版由本 workflow 的 release job 负责
+  CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
 jobs:
   build-win:
     runs-on: windows-latest
@@ -22,7 +26,7 @@ jobs:
       - name: Install & build
         run: |
           npm ci
-          npm run dist:win
+          npx electron-builder --win --publish never
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
@@ -41,7 +45,7 @@ jobs:
       - name: Install & build
         run: |
           npm ci
-          npm run dist:mac
+          npx electron-builder --mac --publish never
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
         with:
