@@ -1,0 +1,61 @@
+{
+  "name": "tkswarm-browses",
+  "version": "1.0.0",
+  "description": "TkSwarm fingerprint browser — Bit Browser API compatible local server",
+  "main": "electron/main.js",
+  "author": "TkSwarm",
+  "license": "UNLICENSED",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "server": "node src/standalone-server.js",
+    "postinstall": "node scripts/ensure-chromium.js || exit 0",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win",
+    "dist:mac": "electron-builder --mac",
+    "smoke": "node scripts/smoke-test.js",
+    "smoke:lifecycle": "node scripts/smoke-lifecycle.js",
+    "smoke:upsert": "node scripts/smoke-upsert.js",
+    "smoke:all": "node scripts/smoke-test.js && node scripts/smoke-lifecycle.js && node scripts/smoke-upsert.js"
+  },
+  "dependencies": {
+    "express": "^4.22.3",
+    "uuid": "^11.1.1"
+  },
+  "devDependencies": {
+    "electron": "^33.3.1",
+    "electron-builder": "^25.1.8",
+    "playwright-core": "^1.50.1"
+  },
+  "build": {
+    "appId": "com.tkswarm.browses",
+    "productName": "TkSwarm Browser",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "electron/**/*",
+      "src/**/*",
+      "ui/**/*",
+      "scripts/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.developer-tools"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}

@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TkSwarm Browser</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Syne:wght@600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app" class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo" aria-hidden="true">T</span>
+        <div class="brand-text">
+          <h1 class="brand-name">TkSwarm</h1>
+          <p class="sub">Browser · 本地 API <code id="api-url">http://127.0.0.1:54345</code></p>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <div id="user-chip" class="user-chip hidden"></div>
+        <button id="btn-logout" class="btn ghost hidden" type="button">退出</button>
+      </div>
+    </header>
+
+    <section id="login-panel" class="login-stage">
+      <div class="login-card anim-enter">
+        <p class="login-eyebrow">本地指纹浏览器</p>
+        <h2 class="login-brand">TkSwarm</h2>
+        <p class="login-product">Browser</p>
+        <p class="hint">使用与 Node 项目相同的管理员账号登录，管理本机浏览器环境。</p>
+        <form id="login-form" class="login-form" autocomplete="on">
+          <label>API 地址
+            <input id="api-base" type="text" placeholder="http://127.0.0.1:8080/api" />
+          </label>
+          <label>用户名
+            <input id="username" type="text" autocomplete="username" />
+          </label>
+          <label>密码
+            <input id="password" type="password" autocomplete="current-password" />
+          </label>
+          <button id="btn-login" class="btn primary block" type="submit">登录</button>
+          <p id="login-error" class="error hidden"></p>
+        </form>
+      </div>
+    </section>
+
+    <section id="dashboard" class="dashboard hidden">
+      <div class="token-bar" id="token-bar">
+        <span class="label">Node API Token · 填入 tkswarm-node 设置</span>
+        <code id="api-token" class="token-code">—</code>
+        <button id="btn-copy-token" class="btn small ghost" type="button">复制</button>
+      </div>
+
+      <div class="meta-strip" id="meta-strip">
+        <div class="meta-item">
+          <span class="meta-label">本账号环境</span>
+          <strong id="stat-self" class="meta-value">0 / 300</strong>
+        </div>
+        <div class="meta-item">
+          <span class="meta-label">运行中窗口</span>
+          <strong id="stat-windows" class="meta-value">0</strong>
+        </div>
+        <div class="meta-item meta-grow">
+          <span class="meta-label">子级账号汇总</span>
+          <div id="stat-children" class="children-list muted">—</div>
+        </div>
+      </div>
+
+      <div class="panel anim-fade">
+        <div class="panel-head">
+          <div>
+            <h2>窗口列表</h2>
+            <p class="panel-desc">当前进程内已打开的环境</p>
+          </div>
+          <button id="btn-refresh" class="btn ghost" type="button">刷新</button>
+        </div>
+        <div class="table-scroll">
+          <table class="win-table">
+            <thead>
+              <tr>
+                <th>环境</th>
+                <th>名称</th>
+                <th>模式</th>
+                <th>PID</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="win-body">
+              <tr><td colspan="5" class="empty">暂无运行中的窗口</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="panel anim-fade">
+        <div class="panel-head">
+          <div>
+            <h2>环境列表</h2>
+            <p class="panel-desc">本账号已创建的浏览器环境（由 Node 侧创建绑定）</p>
+          </div>
+        </div>
+        <div class="table-scroll">
+          <table class="win-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>名称/备注</th>
+                <th>分组</th>
+                <th>代理</th>
+                <th>时区</th>
+                <th>状态</th>
+              </tr>
+            </thead>
+            <tbody id="profile-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

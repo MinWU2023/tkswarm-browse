@@ -1,0 +1,71 @@
+name: Release TkSwarm Browser
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-win:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: tkswarm-browses/package-lock.json
+      - name: Install & build
+        working-directory: tkswarm-browses
+        run: |
+          npm ci
+          npm run dist:win
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TkSwarmBrowser-Windows
+          path: tkswarm-browses/dist/*.exe
+
+  build-mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: tkswarm-browses/package-lock.json
+      - name: Install & build
+        working-directory: tkswarm-browses
+        run: |
+          npm ci
+          npm run dist:mac
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TkSwarmBrowser-macOS
+          path: |
+            tkswarm-browses/dist/*.dmg
+            tkswarm-browses/dist/*.zip
+
+  release:
+    needs: [build-win, build-mac]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "TkSwarm Browser ${GITHUB_REF_NAME}" \
+            --notes "Windows EXE + macOS DMG/ZIP. 本地 API 默认 http://127.0.0.1:54345，与 tkswarm-node 比特接口兼容。" \
+            artifacts/TkSwarmBrowser-Windows/* \
+            artifacts/TkSwarmBrowser-macOS/*
