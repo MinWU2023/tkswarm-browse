@@ -1,4 +1,4 @@
-name: Release TkSwarm Browser
+name: Release 第一页自研浏览器
 
 on:
   push:
@@ -10,7 +10,6 @@ permissions:
   contents: write
 
 env:
-  # electron-builder 在 tag 下会尝试 publish；发版由本 workflow 的 release job 负责
   CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
 jobs:
@@ -23,15 +22,26 @@ jobs:
           node-version: '22'
           cache: npm
           cache-dependency-path: package-lock.json
-      - name: Install & build
+      - name: Install & build Windows (NSIS + portable)
         run: |
           npm ci
-          npx electron-builder --win --publish never
+          npm run dist:win
+      - name: Verify Windows artifacts
+        shell: pwsh
+        run: |
+          Write-Host "=== dist/ ==="
+          Get-ChildItem dist -File | Format-Table Name, Length
+          $setup = Get-ChildItem dist -Filter "*-setup.exe" -ErrorAction SilentlyContinue
+          $portable = Get-ChildItem dist -Filter "*-portable.exe" -ErrorAction SilentlyContinue
+          if (-not $setup) { throw "NSIS setup EXE missing" }
+          if (-not $portable) { throw "Portable EXE missing — check package.json win.target includes portable" }
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
           name: TkSwarmBrowser-Windows
-          path: dist/*.exe
+          path: |
+            dist/*-setup.exe
+            dist/*-portable.exe
 
   build-mac:
     runs-on: macos-latest
@@ -42,10 +52,16 @@ jobs:
           node-version: '22'
           cache: npm
           cache-dependency-path: package-lock.json
-      - name: Install & build
+      - name: Install & build macOS (DMG + ZIP, x64 + arm64)
         run: |
           npm ci
-          npx electron-builder --mac --publish never
+          npm run dist:mac
+      - name: Verify macOS artifacts
+        run: |
+          echo "=== dist/ ==="
+          ls -la dist/
+          test -n "$(ls dist/*.dmg 2>/dev/null)" || (echo "DMG missing" && exit 1)
+          test -n "$(ls dist/*.zip 2>/dev/null)" || (echo "ZIP missing" && exit 1)
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
         with:
@@ -59,7 +75,6 @@ jobs:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
-      # gh release create 需要仓库上下文（或 --repo）；仅 download-artifact 时没有 .git
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
@@ -79,11 +94,25 @@ jobs:
           echo "Uploading ${#files[@]} file(s):"
           printf ' - %s\n' "${files[@]}"
 
+          NOTES="## 下载说明
+
+          ### Windows
+          - **TkSwarmBrowser-*-win-portable.exe** — 绿色免安装便携版（推荐），数据在 exe 同级 data/
+          - **TkSwarmBrowser-*-win-x64-setup.exe** — NSIS 安装版
+
+          ### macOS
+          - **TkSwarmBrowser-*-mac-arm64.dmg** — Apple Silicon (M 系列)
+          - **TkSwarmBrowser-*-mac-x64.dmg** — Intel Mac
+          - 对应 \`.zip\` 为解压即用
+
+          本地 API 默认 http://127.0.0.1:54345，与 tkswarm-node 比特接口兼容。"
+
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
             gh release upload "${GITHUB_REF_NAME}" "${files[@]}" --clobber
+            gh release edit "${GITHUB_REF_NAME}" --notes "$NOTES"
           else
             gh release create "${GITHUB_REF_NAME}" \
-              --title "TkSwarm Browser ${GITHUB_REF_NAME}" \
-              --notes "Windows EXE + macOS DMG/ZIP. 本地 API 默认 http://127.0.0.1:54345，与 tkswarm-node 比特接口兼容。" \
+              --title "第一页自研浏览器 ${GITHUB_REF_NAME}" \
+              --notes "$NOTES" \
               "${files[@]}"
           fi

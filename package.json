@@ -1,7 +1,7 @@
 {
   "name": "tkswarm-browses",
-  "version": "1.0.0",
-  "description": "TkSwarm fingerprint browser — Bit Browser API compatible local server",
+  "version": "1.0.2",
+  "description": "第一页自研浏览器 — Bit Browser API compatible local server",
   "main": "electron/main.js",
   "author": "TkSwarm",
   "license": "UNLICENSED",
@@ -13,6 +13,7 @@
     "pack": "electron-builder --dir",
     "dist": "electron-builder --publish never",
     "dist:win": "electron-builder --win --publish never",
+    "dist:win:portable": "electron-builder --win portable --publish never",
     "dist:mac": "electron-builder --mac --publish never",
     "smoke": "node scripts/smoke-test.js",
     "smoke:lifecycle": "node scripts/smoke-lifecycle.js",
@@ -30,10 +31,14 @@
   },
   "build": {
     "appId": "com.tkswarm.browses",
-    "productName": "TkSwarm Browser",
+    "productName": "第一页自研浏览器",
+    "executableName": "TkSwarmBrowser",
     "directories": {
-      "output": "dist"
+      "output": "dist",
+      "buildResources": "build"
     },
+    "compression": "maximum",
+    "electronLanguages": ["en-US", "zh-CN"],
     "files": [
       "electron/**/*",
       "src/**/*",
@@ -43,19 +48,36 @@
     ],
     "win": {
       "target": [
-        "nsis"
-      ]
-    },
-    "mac": {
-      "target": [
-        "dmg",
-        "zip"
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
       ],
-      "category": "public.app-category.developer-tools"
+      "artifactName": "TkSwarmBrowser-${version}-win-${arch}-setup.${ext}",
+      "executableName": "TkSwarmBrowser"
+    },
+    "portable": {
+      "artifactName": "TkSwarmBrowser-${version}-win-portable.${ext}"
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "第一页自研浏览器"
+    },
+    "mac": {
+      "target": [
+        { "target": "dmg", "arch": ["x64", "arm64"] },
+        { "target": "zip", "arch": ["x64", "arm64"] }
+      ],
+      "category": "public.app-category.developer-tools",
+      "artifactName": "TkSwarmBrowser-${version}-mac-${arch}.${ext}",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist"
+    },
+    "dmg": {
+      "artifactName": "TkSwarmBrowser-${version}-mac-${arch}.${ext}"
     }
   }
 }
