@@ -198,7 +198,7 @@ function buildInjectScript(seedKey, fp = {}) {
   // —— WebRTC 防泄露 ——
   try {
     const Blocked = function() {
-      throw new DOMException('WebRTC disabled by TkSwarm Browser', 'NotAllowedError');
+      throw new DOMException('WebRTC disabled by 第一页自研浏览器', 'NotAllowedError');
     };
     Blocked.prototype = {};
     if (typeof window.RTCPeerConnection !== 'undefined') {

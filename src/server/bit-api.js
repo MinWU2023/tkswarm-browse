@@ -4,6 +4,7 @@ const manager = require('../browser/manager');
 const { mergeFingerprint } = require('../browser/fingerprint');
 const { getCurrentUser } = require('../db');
 const { isAuthorizedRequest } = require('../settings');
+const { resolveEngine } = require('../browser/engine');
 const { probeExitIp } = require('../browser/exit-ip');
 const { lookupGeoByIp, applyIpCreateFields } = require('../browser/geo-from-ip');
 const { clearProfileCache, removeProfileDir } = require('../browser/profile-cleanup');
@@ -99,6 +100,7 @@ function createRouter() {
       status: 'ok',
       provider: 'tkswarm-browses',
       loggedIn: !!user,
+      engine: resolveEngine(),
       version: '1.0.0',
     }));
   });

@@ -1,4 +1,4 @@
-# TkSwarm Browser (`tkswarm-browses`)
+# 第一页自研浏览器 (`tkswarm-browses`)
 
 专为 **tkswarm-node** 打造的指纹浏览器，**本地 API 与比特浏览器完全兼容**（默认 `http://127.0.0.1:54345`），Node 项目无需大改，只需把「浏览器 API 地址」指向本服务即可。
 
@@ -35,7 +35,7 @@ npm run dev        # 开发模式 + DevTools
 npm run server     # 仅 API（需先在桌面端登录）
 ```
 
-1. 启动 **TkSwarm Browser** 桌面应用  
+1. 启动 **第一页自研浏览器** 桌面应用  
 2. 使用与 Node 相同的管理员账号登录  
 3. 复制登录后显示的 **API Token** 到 Node「设置 → 浏览器 API Token」（与 `browserApiToken` 相同）  
 4. Node 设置里浏览器 API 地址保持：`http://127.0.0.1:54345`
@@ -90,6 +90,29 @@ git push origin v1.0.0
 
 见 `.env.example`。
 
+## 内核引擎（engine）
+
+打开一个环境时，谁在承载浏览器窗口由 `engine` 决定：
+
+| engine | 说明 |
+|---|---|
+| `electron`（默认） | 用**自研本体**（本 exe / Electron）承载窗口：窗口就是「第一页自研浏览器」，标题为环境名，无 Chrome 界面；每个环境一个子进程 + 独立 `userData`，CDP 端口独立 |
+| `chrome` | 旧方案：拉起系统 Chrome / Chromium（`chrome-path.js` 三级探测），窗口是 Google Chrome |
+
+切换优先级：环境变量 `TKSWARM_BROWSER_ENGINE=electron|chrome` > `data/settings.json` 的 `"engine"` > 默认。
+
+- Electron 控制台（`npm start` / 打包 exe）默认走 `electron`，**不会再打开你电脑上的谷歌浏览器**
+- 纯 node 调试模式（`npm run server`）没有 Electron 运行时，自动退回 `chrome`
+- `electron` 引擎下 `chrome-path.js`（系统 Chrome 探测）不再参与
+
+实现：`src/browser/engine.js`（选择）、`src/browser/electron-launcher.js`（拉起自研子进程）、`src/browser/env-window.js`（子进程里的环境窗口）。
+
+补充说明：
+
+- 指纹注入在 `electron` 引擎下由**环境进程内**的 `webContents.debugger` 下发（`Page.addScriptToEvaluateOnNewDocument` + 时区/语言/地理 Emulation），因为 Electron 主进程的 Node 20 没有全局 `WebSocket`，父进程那条 CDP 注入会空转。
+- 如需关闭该注入（例如排查自动化冲突），在 `data/settings.json` 里加 `"fpInjectElectron": false`。
+- 环境 Profile 目录沿用 `profiles/<环境ID>`；从 `chrome` 引擎切到 `electron` 时，老环境（由系统 Chrome 写出的目录）通常可继续使用；若出现异常，删除该环境重建并重新登录即可。
+
 ## 指纹与代理
 
 - **深度指纹**：打开环境时经 CDP 注入 Canvas / WebGL / Audio / Navigator 噪声（按环境 ID 稳定）
@@ -99,4 +122,4 @@ git push origin v1.0.0
 
 ## Node 设置
 
-设置 → 浏览器设置 → **检测 TkSwarm Browser**：一键测连通、识别是否为本服务，并可将地址回填为 `http://127.0.0.1:54345`。
+设置 → 浏览器设置 → **检测 第一页自研浏览器**：一键测连通、识别是否为本服务，并可将地址回填为 `http://127.0.0.1:54345`。

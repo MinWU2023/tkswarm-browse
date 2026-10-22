@@ -1,5 +1,7 @@
 const { EventEmitter } = require('node:events');
 const { launchProfile, killProcessAndWait, clearPid, isPidAlive } = require('./launcher');
+const { launchProfileElectron } = require('./electron-launcher');
+const { resolveEngine } = require('./engine');
 const { reclaimOrphans } = require('./process-guard');
 const { MAX_CONCURRENT_OPENS } = require('../config');
 const db = require('../db');
@@ -16,6 +18,8 @@ try {
 } catch { /* ignore */ }
 
 function listWindows() {
+  // 用户直接点窗口关闭时子进程会退出，这里顺带清理掉已死的 session
+  for (const id of [...running.keys()]) dropStaleSession(id);
   return [...running.entries()].map(([id, s]) => ({
     id,
     profileId: id,
@@ -23,6 +27,7 @@ function listWindows() {
     ownerId: s.profile?.owner_id || 0,
     pid: s.pid,
     headless: s.headless,
+    engine: s.engine || 'chrome',
     ws: s.ws,
     http: s.http,
     port: s.port,
@@ -96,10 +101,10 @@ async function openProfile(profileId, options = {}) {
     const profile = db.getProfile(id);
     if (!profile) throw new Error('browser环境不存在或已删除');
 
-    const launched = await launchProfile(profile, {
-      headless: options.headless,
-      args: options.args,
-    });
+    const engine = resolveEngine();
+    const launched = engine === 'electron'
+      ? await launchProfileElectron(profile, { headless: options.headless, args: options.args })
+      : await launchProfile(profile, { headless: options.headless, args: options.args });
 
     const session = {
       ...launched,
@@ -122,6 +127,7 @@ function formatOpenResult(id, session) {
     pid: session.pid,
     name: session.profile?.name || id,
     seq: session.profile?.seq,
+    engine: session.engine || 'chrome',
     coreVersion: fp.coreVersion || '131',
     headless: session.headless,
   };
@@ -135,7 +141,12 @@ async function closeProfile(profileId) {
     db.setProfileStatus(id, 'idle');
     return { ok: true };
   }
-  await killProcessAndWait(session.process, 10000, session.port || 0);
+  await killProcessAndWait(
+    session.process,
+    10000,
+    // 自研内核子进程：关窗即退出，不走 Browser.close（Electron 不支持该方法，会白等超时）
+    session.engine === 'electron' ? 0 : (session.port || 0)
+  );
   try { session.releaseProxy?.(); } catch { /* */ }
   clearPid(id);
   running.delete(id);

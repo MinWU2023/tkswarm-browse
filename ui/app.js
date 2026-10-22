@@ -82,7 +82,7 @@ async function refreshDashboard() {
   const profiles = await bitListProfiles();
   const profileBody = document.getElementById('profile-body');
   if (!profiles.length) {
-    profileBody.innerHTML = emptyRow(6, '暂无环境', '请在 TkSwarm Node 账号页创建并绑定');
+    profileBody.innerHTML = emptyRow(6, '暂无环境', '请在 Node 账号页创建并绑定');
   } else {
     profileBody.innerHTML = profiles.map((p) => {
       const running = p.status === 1 || p.status === 2;

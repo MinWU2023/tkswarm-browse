@@ -1,4 +1,4 @@
-# TkSwarm 自研浏览器（tkswarm-browses）推代码与版本打包
+# 第一页自研浏览器（tkswarm-browses）推代码与版本打包
 
 > 项目目录：`tkswarm-browses/`  
 > 自动打包工作流：仓库根目录 [`.github/workflows/tkswarm-browses-release.yml`](../.github/workflows/tkswarm-browses-release.yml)  
@@ -81,7 +81,7 @@ $VER = "1.0.1"
 git push origin HEAD
 
 # 打 annotated tag 并推送（推送 tag 才会跑 Actions）
-git tag -a "browser-v$VER" -m "TkSwarm Browser v$VER"
+git tag -a "browser-v$VER" -m "第一页自研浏览器 v$VER"
 git push origin "browser-v$VER"
 ```
 
@@ -90,19 +90,19 @@ git push origin "browser-v$VER"
 ```bash
 VER=1.0.1
 git push origin HEAD
-git tag -a "browser-v${VER}" -m "TkSwarm Browser v${VER}"
+git tag -a "browser-v${VER}" -m "第一页自研浏览器 v${VER}"
 git push origin "browser-v${VER}"
 ```
 
 ### 之后发生什么
 
-1. GitHub Actions 跑 `Release TkSwarm Browser`
-2. Windows runner：`npm run dist:win` → 上传 `*.exe`
+1. GitHub Actions 跑 `Release 第一页自研浏览器`
+2. Windows runner：`npm run dist:win` → 上传 NSIS 安装包 `*-win-x64.exe` + 绿色便携版 `*-win-portable.exe`
 3. macOS runner：`npm run dist:mac` → 上传 `*.dmg` / `*.zip`
 4. 两个平台都成功后，用 `gh release create` 生成 Release：
    - Tag / Release 名：`browser-v1.0.1`
-   - 标题：`TkSwarm Browser v1.0.1`
-   - 附件：Win EXE + Mac DMG/ZIP
+   - 标题：`第一页自研浏览器 v1.0.1`
+   - 附件：Win 安装包 + Win 便携版 + Mac DMG/ZIP
 
 查看进度：
 
@@ -111,7 +111,7 @@ gh run list --workflow=tkswarm-browses-release.yml
 gh release view browser-v1.0.1
 ```
 
-浏览器打开：仓库 → **Actions** → **Release TkSwarm Browser**；产物在 **Releases**。
+浏览器打开：仓库 → **Actions** → **Release 第一页自研浏览器**；产物在 **Releases**。
 
 ---
 
@@ -143,8 +143,11 @@ npm install
 # 仅打未安装目录（调试用）
 npm run pack
 
-# Windows NSIS 安装包 → dist/*.exe
+# Windows：NSIS 安装包 + 绿色便携版 → dist/*-win-x64.exe、dist/*-win-portable.exe
 npm run dist:win
+
+# 仅打绿色便携版
+npm run dist:win:portable
 
 # macOS（需在 Mac 上）→ dist/*.dmg、*.zip
 npm run dist:mac
@@ -162,7 +165,7 @@ npm run dist:win
 
 ```bash
 gh release create browser-v1.0.1 `
-  --title "TkSwarm Browser v1.0.1" `
+  --title "第一页自研浏览器 v1.0.1" `
   --notes "Windows / macOS 安装包。本地 API: http://127.0.0.1:54345" `
   tkswarm-browses/dist/*.exe
 # Mac 产物同理追加 dist/*.dmg dist/*.zip
@@ -188,7 +191,7 @@ git commit -m "chore(browses): bump version to $VER"
 git push origin HEAD
 
 # 3) 打 tag 触发 CI 打包 + Release
-git tag -a "browser-v$VER" -m "TkSwarm Browser v$VER"
+git tag -a "browser-v$VER" -m "第一页自研浏览器 v$VER"
 git push origin "browser-v$VER"
 
 # 4) 盯构建
@@ -201,9 +204,11 @@ gh run list --workflow=tkswarm-browses-release.yml --limit 3
 
 | 问题 | 处理 |
 |------|------|
-| 推了 tag 没跑 Actions | 确认 tag 名是 `browser-v1.x.x`，不是 `v1.x.x`；确认 workflow 文件在**仓库根** `.github/workflows/` |
+| 推了 tag 没跑 Actions | monorepo 用 `browser-v1.x.x`；独立仓库 `tkswarm-browse` 用 `v1.x.x` |
+| Release 只有安装版没有便携版 | 旧版 `package.json` 的 `win.target` 只有 `nsis`；需升级到含 `portable` 的配置后重打 tag |
 | 只出了 Artifacts 没有 Release | 是否用了 `workflow_dispatch` 而不是推 tag；或 Win/Mac 某一 job 失败 |
 | Mac 包打不出来 | `dist:mac` 必须在 macOS runner / 本机 Mac；不要在 Windows 上跑 |
+| Mac 只有 arm64 | 旧 CI 仅 Apple Silicon；现配置会同时打 x64 + arm64 |
 | tag 打错了 | `git push origin :refs/tags/browser-v错版` 删远端 tag 后重打（若已建 Release，先在网页删 Release） |
 | `tkswarm-browses/.github/workflows/release.yml` | **独立仓库** `tkswarm-browse` 用这份：tag `v*`，路径在仓库根（`package-lock.json` / `dist/`）。monorepo 仍以根目录 `browser-v*` 工作流为准 |
 
@@ -215,6 +220,7 @@ gh run list --workflow=tkswarm-browses-release.yml --limit 3
 |------|------|
 | 自研浏览器源码 | `tkswarm-browses/` |
 | 版本号 | `tkswarm-browses/package.json` → `version` |
-| 本地打包脚本 | `npm run dist:win` / `dist:mac` |
+| 本地打包脚本 | `npm run dist:win`（含便携版）/ `dist:win:portable` / `dist:mac` |
+| 便携版数据目录 | exe 同级 `data/`（可用 `TKSWARM_BROWSER_DATA` 覆盖） |
 | CI 自动发版 | `.github/workflows/tkswarm-browses-release.yml` |
 | 项目简介 | `tkswarm-browses/README.md` |

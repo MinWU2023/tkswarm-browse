@@ -4,6 +4,6 @@ const { startServer } = require('./server');
 const { API_HOST, API_PORT } = require('./config');
 
 startServer(API_PORT, API_HOST).then(({ url }) => {
-  console.log(`TkSwarm Browser API listening at ${url}`);
-  console.log('请在 TkSwarm Browser 桌面端登录后再调用 browser/* 接口');
+  console.log(`第一页自研浏览器 API listening at ${url}`);
+  console.log('请在 第一页自研浏览器 桌面端登录后再调用 browser/* 接口');
 });

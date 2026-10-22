@@ -236,4 +236,15 @@ async function killProcessAndWait(proc, timeoutMs = 8000, debugPort = 0) {
   return !isPidAlive(pid);
 }
 
-module.exports = { launchProfile, killProcess, killProcessAndWait, profileDir, clearPid, isPidAlive };
+module.exports = {
+  launchProfile,
+  killProcess,
+  killProcessAndWait,
+  profileDir,
+  clearPid,
+  isPidAlive,
+  // 供 electron-launcher 复用同一套 CDP 等待/注入流程
+  getFreePort,
+  waitForDevtools,
+  waitForPageTarget,
+};

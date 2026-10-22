@@ -8,6 +8,13 @@ function appDataRoot() {
   if (process.env.TKSWARM_BROWSER_DATA) {
     return path.resolve(process.env.TKSWARM_BROWSER_DATA);
   }
+  // electron-builder portable：数据目录在 exe 同级的 data/
+  const portableDir = process.env.PORTABLE_EXECUTABLE_DIR;
+  if (portableDir) {
+    const dir = path.join(path.resolve(portableDir), 'data');
+    fs.mkdirSync(dir, { recursive: true });
+    return dir;
+  }
   const base = process.env.APPDATA
     || (process.platform === 'darwin'
       ? path.join(os.homedir(), 'Library', 'Application Support')
