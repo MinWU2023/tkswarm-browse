@@ -44,7 +44,10 @@ function resolveChromeExecutable() {
       return p;
     }
   }
-  throw new Error('未找到 Chrome/Chromium。请安装 Google Chrome 或运行 npm run postinstall');
+  throw new Error(
+    '未找到 Chrome/Chromium。Windows 打包版环境窗需要本机已安装 Google Chrome，'
+    + '或设置环境变量 TKSWARM_CHROME_PATH 指向 chrome.exe'
+  );
 }
 
 module.exports = { resolveChromeExecutable };

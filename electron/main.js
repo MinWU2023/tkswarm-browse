@@ -1,23 +1,77 @@
 const { app, BrowserWindow, Tray, Menu, nativeImage } = require('electron');
 const path = require('node:path');
+const { bootstrapRenderFlags, wantSoftwareRender } = require('../src/browser/render-flags');
+const { applyChromiumArgvToApp } = require('../src/browser/chromium-argv');
+const { useInProcessEnvWindows } = require('../src/browser/engine');
 
-/**
- * 同一个 exe 有两种角色：
- *  1) 控制台进程（默认）：起本地 API + 管理窗口 UI
- *  2) 环境窗口进程（`--tkswarm-env`）：由控制台拉起，只承载一个浏览器环境
- * 环境进程必须在 ready 之前设置自己的 userData，且绝不能启动 API（端口会冲突）。
- */
+const softwareRenderReason = bootstrapRenderFlags();
+
+if (process.platform === 'win32') {
+  try { app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion'); } catch { /* */ }
+}
+try { app.allowRendererProcessReuse = false; } catch { /* */ }
+
 const IS_ENV_PROCESS = process.argv.includes('--tkswarm-env');
+const IN_PROCESS_ENVS = !IS_ENV_PROCESS && useInProcessEnvWindows();
+const MAIN_CDP_PORT = Number(process.env.TKSWARM_MAIN_CDP_PORT) || 19222;
+
+function startEnvWindow() {
+  try {
+    require('../src/browser/env-window');
+  } catch (error) {
+    const detail = String(error?.stack || error || '未知错误');
+    console.error('[env-window] 启动失败:', detail);
+    app.whenReady().then(() => {
+      const fs = require('node:fs');
+      const os = require('node:os');
+      const pathMod = require('node:path');
+      const esc = detail.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+      const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>环境窗口启动失败</title>
+<style>body{font-family:system-ui,"Microsoft YaHei",sans-serif;margin:0;padding:32px;background:#fdf7f0;color:#1d1310;line-height:1.7}
+h2{margin:0 0 8px;font-size:19px}p{color:#6b564a}
+pre{background:#fff;border:1px solid #ecdac7;border-radius:12px;padding:16px;overflow:auto;white-space:pre-wrap;word-break:break-all}</style></head>
+<body><h2>环境窗口启动失败</h2>
+<p>这是自研内核的环境子进程，没能加载 env-window 模块。请把下面内容发给技术支持：</p>
+<pre>${esc}</pre></body></html>`;
+      const win = new BrowserWindow({
+        width: 940,
+        height: 640,
+        backgroundColor: '#fdf7f0',
+        title: '环境窗口启动失败',
+        webPreferences: { contextIsolation: true, nodeIntegration: false },
+      });
+      const file = pathMod.join(os.tmpdir(), `tkswarm-env-boot-error-${process.pid}.html`);
+      try {
+        fs.writeFileSync(file, html, 'utf8');
+        win.loadFile(file);
+      } catch {
+        win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+      }
+    }).catch(() => {});
+  }
+}
 
 if (IS_ENV_PROCESS) {
-  // 环境窗口：独立 Profile + 独立 CDP 端口
-  require('../src/browser/env-window');
+  try {
+    const cfg = JSON.parse(process.env.TKSWARM_ENV_CONFIG || '{}');
+    applyChromiumArgvToApp(app, {
+      softwareRender: cfg.softwareRender || Boolean(wantSoftwareRender()),
+      disableSandbox: app.isPackaged,
+      profileId: String(cfg.profileId || ''),
+    });
+  } catch { /* ignore */ }
+  startEnvWindow();
 } else {
+  if (IN_PROCESS_ENVS) {
+    app.commandLine.appendSwitch('remote-debugging-port', String(MAIN_CDP_PORT));
+    app.commandLine.appendSwitch('remote-allow-origins', '*');
+    const { initEnvSessionHost } = require('../src/browser/env-session-host');
+    initEnvSessionHost(MAIN_CDP_PORT);
+  }
+
   const { startServer } = require('../src/server');
   const { API_PORT, API_HOST, isDev } = require('../src/config');
   const manager = require('../src/browser/manager');
-  const { resolveEngine } = require('../src/browser/engine');
-
   let mainWindow = null;
   let tray = null;
   let apiServer = null;
@@ -26,7 +80,15 @@ if (IS_ENV_PROCESS) {
     if (apiServer) return apiServer;
     apiServer = await startServer(API_PORT, API_HOST);
     console.log(`[第一页自研浏览器] Local API: http://${API_HOST}:${API_PORT}`);
-    console.log(`[第一页自研浏览器] 内核引擎: ${resolveEngine()}（可用 TKSWARM_BROWSER_ENGINE 或 data/settings.json 的 engine 切换）`);
+    console.log(`[第一页自研浏览器] 版本 v${app.getVersion()}`);
+    const mode = IN_PROCESS_ENVS ? 'electron/同进程窗口' : 'electron/子进程窗口';
+    console.log(`[第一页自研浏览器] 内核: ${mode}${IN_PROCESS_ENVS ? `（CDP :${MAIN_CDP_PORT}）` : ''}`);
+    if (softwareRenderReason) {
+      console.log(`[第一页自研浏览器] 软件渲染: ${softwareRenderReason}`);
+    }
+    if (process.env.PORTABLE_EXECUTABLE_FILE) {
+      console.log(`[第一页自研浏览器] 便携入口: ${process.env.PORTABLE_EXECUTABLE_FILE}`);
+    }
     return apiServer;
   }
 
@@ -63,12 +125,48 @@ if (IS_ENV_PROCESS) {
     ]));
   }
 
+  function createAppMenu() {
+    const template = [
+      {
+        label: '调试',
+        submenu: [
+          {
+            label: '打开测试环境窗（直连 dyyseo.com）',
+            click: () => {
+              manager.openTestEnvWindow()
+                .then(() => mainWindow?.webContents.send('windows-updated'))
+                .catch((error) => {
+                  console.error('[测试环境窗]', error);
+                  mainWindow?.webContents.send('test-env-error', String(error?.message || error));
+                });
+            },
+          },
+          {
+            label: '关闭测试环境窗',
+            click: () => {
+              const { TEST_PROFILE_ID } = require('../src/browser/test-env');
+              manager.closeProfile(TEST_PROFILE_ID).catch(() => {});
+            },
+          },
+        ],
+      },
+      {
+        label: '窗口',
+        submenu: [
+          { role: 'minimize' },
+          { role: 'close' },
+        ],
+      },
+    ];
+    Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+  }
+
   app.whenReady().then(async () => {
     await bootApi();
+    createAppMenu();
     createWindow();
     createTray();
 
-    // 环境窗口子进程退出后刷新控制台列表
     manager.events.on('window-open', () => mainWindow?.webContents.send('windows-updated'));
     manager.events.on('window-close', () => mainWindow?.webContents.send('windows-updated'));
   });

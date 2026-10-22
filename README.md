@@ -109,9 +109,19 @@ git push origin v1.0.0
 
 补充说明：
 
-- 指纹注入在 `electron` 引擎下由**环境进程内**的 `webContents.debugger` 下发（`Page.addScriptToEvaluateOnNewDocument` + 时区/语言/地理 Emulation），因为 Electron 主进程的 Node 20 没有全局 `WebSocket`，父进程那条 CDP 注入会空转。
-- 如需关闭该注入（例如排查自动化冲突），在 `data/settings.json` 里加 `"fpInjectElectron": false`。
+- `electron` 引擎下**不再**由父进程经 CDP 预注入指纹：Electron 主进程的 Node 20 没有全局 `WebSocket`，且 `Target.setAutoAttach` 会占用通道导致 Playwright `connectOverCDP` 30 秒超时。真实 UA / 语言 / 时区 / 代理 / 分辨率由启动参数 + 环境窗口 session 决定，Canvas / WebGL 噪声由 Node 侧 `page` 操作兜底。
 - 环境 Profile 目录沿用 `profiles/<环境ID>`；从 `chrome` 引擎切到 `electron` 时，老环境（由系统 Chrome 写出的目录）通常可继续使用；若出现异常，删除该环境重建并重新登录即可。
+- 窗口标题固定为「环境名 - 第一页自研浏览器」，不会被站点标题顶掉。
+
+## 窗口空白 / 打不开页面的排查
+
+每个环境一个子进程，现在任何加载问题都会落到**诊断页**（不再是纯白窗口），并写入 `data/logs/env-<环境ID>.log`：
+
+1. **诊断页写「页面加载失败 / 加载超时」** → 账号绑定的代理不通。用账号页的「诊断」验证代理，或先解绑代理直连测试。
+2. **诊断页写「页面已加载，但内容为空」** → 站点只返回空壳（登录墙 / 反爬 / 该出口 IP 被拦）。换代理，或先在窗口里手动登录一次。
+3. **诊断页写「页面有内容，但窗口渲染成纯白」** → 显卡 / 远程桌面硬件合成问题。在 `data/settings.json` 加 `"envSoftwareRender": true`（或设环境变量 `TKSWARM_ENV_SOFTWARE_RENDER=1`）后重启客户端，环境窗口改用软件渲染。
+4. **窗口一闪就没了** → 在 `data/logs/env-<环境ID>.log` 里搜 `env 进程退出`；常见是 Profile 目录不可写（便携版放在只读目录 / 网盘同步目录），此时会自动回退到临时目录并在日志里注明。
+5. **内置的「加载中 / 诊断」页面走 `file://`**（写进系统临时目录），不再用 `data:` URL —— 部分企业策略会禁用 `data:` 协议，一旦被拦就只剩白窗。
 
 ## 指纹与代理
 

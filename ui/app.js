@@ -33,13 +33,29 @@ function emptyRow(colspan, title, detail) {
 }
 
 async function refreshDashboard() {
-  const pack = await json('GET', '/api/dashboard/stats/async');
+  const [pack, sys] = await Promise.all([
+    json('GET', '/api/dashboard/stats/async'),
+    json('GET', '/api/system/info').catch(() => ({})),
+  ]);
   if (!pack.ok) return;
+  const pathBar = document.getElementById('path-bar');
+  if (pathBar && sys.ok) {
+    const renderOn = sys.softwareRenderActive
+      ? `已开启${sys.softwareRenderReason ? `（${sys.softwareRenderReason}）` : ''}`
+      : '未开启';
+    pathBar.innerHTML = [
+      `<b>便携版数据目录</b>：<code>${esc(sys.dataRoot)}</code>`,
+      `<b>settings.json</b>：<code>${esc(sys.settingsPath)}</code>`,
+      `软件渲染 ${renderOn} · 内核 ${esc(sys.engine || '—')} · 环境窗 ${esc(sys.envWindowMode || '—')} · v${esc(sys.version || '')}`,
+      sys.packagedPortable ? '<span class="muted">便携版环境窗经 portable.exe 子进程拉起（勿用 Temp 内 exe）</span>' : '',
+    ].filter(Boolean).join('<br>');
+  }
   const { user, self, children, windows } = pack;
   document.getElementById('user-chip').textContent =
     `${user.nickname || user.username} · ${user.role || ''}`;
   show('#user-chip', true);
   show('#btn-logout', true);
+  show('#btn-test-env', true);
   document.getElementById('stat-self').textContent = `${self.used} / ${self.limit}`;
   const tokenEl = document.getElementById('api-token');
   if (pack.token) tokenEl.textContent = pack.token;
@@ -134,12 +150,19 @@ async function doLogin(e) {
   await refreshDashboard();
 }
 
+const DEFAULT_API_BASE = 'http://tkswarm-api.dyyweb.com/api';
+
+function normalizeLoginApiBase(raw) {
+  const v = String(raw || '').trim().replace(/\/+$/, '');
+  if (!v || /127\.0\.0\.1|localhost/i.test(v)) return DEFAULT_API_BASE;
+  return v;
+}
+
 async function init() {
   document.getElementById('api-url').textContent = API;
+  const apiBaseEl = document.getElementById('api-base');
   const settings = await json('GET', '/api/settings').catch(() => ({}));
-  if (settings.apiBase) {
-    document.getElementById('api-base').value = settings.apiBase;
-  }
+  apiBaseEl.value = normalizeLoginApiBase(settings.apiBase || settings.defaultApiBase || DEFAULT_API_BASE);
   const st = await json('GET', '/api/auth/status');
   if (st.loggedIn) {
     show('#login-panel', false);
@@ -156,6 +179,26 @@ async function init() {
     show('#login-panel', true);
     show('#user-chip', false);
     show('#btn-logout', false);
+    show('#btn-test-env', false);
+  };
+  document.getElementById('btn-test-env').onclick = async () => {
+    const btn = document.getElementById('btn-test-env');
+    const label = '测试环境窗';
+    btn.disabled = true;
+    btn.textContent = '打开中…';
+    try {
+      const pack = await json('POST', '/api/test/open-env-window');
+      if (!pack.ok) {
+        alert(pack.message || '测试环境窗打开失败');
+      } else {
+        await refreshDashboard();
+      }
+    } catch (error) {
+      alert(error?.message || '请求失败');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = label;
+    }
   };
   document.getElementById('btn-refresh').onclick = () => refreshDashboard();
   document.getElementById('btn-copy-token').onclick = async () => {
@@ -166,6 +209,9 @@ async function init() {
     setTimeout(() => { document.getElementById('btn-copy-token').textContent = '复制'; }, 1500);
   };
   window.tkswarmBrowser?.onWindowsUpdated?.(() => refreshDashboard());
+  window.tkswarmBrowser?.onTestEnvError?.((msg) => {
+    alert(`测试环境窗打开失败：${msg}`);
+  });
   setInterval(() => refreshDashboard(), 8000);
 }
 

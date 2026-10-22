@@ -37,7 +37,8 @@
       "output": "dist",
       "buildResources": "build"
     },
-    "compression": "maximum",
+    "asar": true,
+    "compression": "normal",
     "electronLanguages": [
       "en-US",
       "zh-CN"
@@ -68,7 +69,8 @@
       "executableName": "TkSwarmBrowser"
     },
     "portable": {
-      "artifactName": "TkSwarmBrowser-${version}-win-portable.${ext}"
+      "artifactName": "TkSwarmBrowser-${version}-win-portable.${ext}",
+      "unpackDirName": "TkSwarmBrowser-${version}"
     },
     "nsis": {
       "oneClick": false,

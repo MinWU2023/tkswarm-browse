@@ -38,5 +38,5 @@ module.exports = {
   /** 同时运行的 Chrome 窗口上限（内存保护）；0 = 不限制 */
   MAX_CONCURRENT_OPENS: Number(process.env.TKSWARM_BROWSER_MAX_CONCURRENT || 20),
   DEFAULT_API_TOKEN: process.env.TKSWARM_BROWSER_TOKEN || '',
-  TKSWARM_API_BASE: process.env.TKSWARM_API_BASE || 'http://127.0.0.1:8080/api',
+  TKSWARM_API_BASE: process.env.TKSWARM_API_BASE || 'http://tkswarm-api.dyyweb.com/api',
 };

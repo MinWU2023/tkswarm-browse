@@ -190,7 +190,12 @@ function createRouter() {
       if (!gate.ok) return res.json(fail(gate.msg));
       const args = req.body?.args;
       const headless = Array.isArray(args) && args.some((a) => /headless/i.test(String(a)));
-      const data = await manager.openProfile(id, { headless, args, queue: req.body?.queue !== false });
+      const data = await manager.openProfile(id, {
+        headless,
+        args,
+        queue: req.body?.queue !== false,
+        forceRelaunch: Boolean(req.body?.forceRelaunch || req.body?.force_relaunch),
+      });
       res.json(ok(data));
     } catch (e) {
       res.json(fail(e.message || '打开失败'));

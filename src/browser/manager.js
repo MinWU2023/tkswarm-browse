@@ -1,10 +1,11 @@
 const { EventEmitter } = require('node:events');
 const { launchProfile, killProcessAndWait, clearPid, isPidAlive } = require('./launcher');
 const { launchProfileElectron } = require('./electron-launcher');
-const { resolveEngine } = require('./engine');
+const { resolveEngine, useInProcessEnvWindows } = require('./engine');
 const { reclaimOrphans } = require('./process-guard');
 const { MAX_CONCURRENT_OPENS } = require('../config');
 const db = require('../db');
+const { buildTestProfile, isTestProfileId, TEST_PROFILE_ID } = require('./test-env');
 
 /** @type {Map<string, object>} */
 const running = new Map();
@@ -37,6 +38,7 @@ function listWindows() {
 
 function isSessionAlive(session) {
   if (!session) return false;
+  if (session.inProcess && session.window && !session.window.isDestroyed()) return true;
   if (session.pid && isPidAlive(session.pid)) return true;
   if (session.process?.pid && isPidAlive(session.process.pid)) return true;
   return false;
@@ -50,7 +52,7 @@ function dropStaleSession(id) {
   try { session.releaseProxy?.(); } catch { /* */ }
   clearPid(id);
   running.delete(id);
-  db.setProfileStatus(id, 'idle');
+  if (!isTestProfileId(id)) db.setProfileStatus(id, 'idle');
   return true;
 }
 
@@ -79,8 +81,11 @@ function enqueueOpen(fn) {
 async function openProfile(profileId, options = {}) {
   const id = String(profileId);
   dropStaleSession(id);
+  const forceRelaunch = Boolean(options.forceRelaunch);
   const existing = running.get(id);
-  if (existing?.ws && isSessionAlive(existing)) {
+  if (forceRelaunch && existing) {
+    await closeProfile(id).catch(() => {});
+  } else if (existing?.ws && isSessionAlive(existing)) {
     return formatOpenResult(id, existing);
   }
   if (existing) dropStaleSession(id);
@@ -102,9 +107,15 @@ async function openProfile(profileId, options = {}) {
     if (!profile) throw new Error('browser环境不存在或已删除');
 
     const engine = resolveEngine();
-    const launched = engine === 'electron'
-      ? await launchProfileElectron(profile, { headless: options.headless, args: options.args })
-      : await launchProfile(profile, { headless: options.headless, args: options.args });
+    let launched;
+    if (engine === 'electron' && useInProcessEnvWindows()) {
+      const { launchProfileInProcess } = require('./env-session-host');
+      launched = await launchProfileInProcess(profile, { headless: options.headless, args: options.args });
+    } else if (engine === 'electron') {
+      launched = await launchProfileElectron(profile, { headless: options.headless, args: options.args });
+    } else {
+      launched = await launchProfile(profile, { headless: options.headless, args: options.args });
+    }
 
     const session = {
       ...launched,
@@ -112,7 +123,43 @@ async function openProfile(profileId, options = {}) {
       startedAt: new Date().toISOString(),
     };
     running.set(id, session);
-    db.setProfileStatus(id, options.headless ? 'headless' : 'running');
+    if (!isTestProfileId(id)) db.setProfileStatus(id, options.headless ? 'headless' : 'running');
+    events.emit('window-open', listWindows());
+    return formatOpenResult(id, session);
+  });
+}
+
+/** 顶部菜单 / 控制台：直连测试环境窗（不走代理，打开 dyyseo.com） */
+async function openTestEnvWindow() {
+  const profile = buildTestProfile();
+  const id = TEST_PROFILE_ID;
+  dropStaleSession(id);
+  const existing = running.get(id);
+  if (existing && isSessionAlive(existing)) {
+    await closeProfile(id).catch(() => {});
+  }
+
+  return enqueueOpen(async () => {
+    dropStaleSession(id);
+
+    const engine = resolveEngine();
+    let launched;
+    if (engine === 'electron' && useInProcessEnvWindows()) {
+      const { launchProfileInProcess } = require('./env-session-host');
+      launched = await launchProfileInProcess(profile, { headless: false });
+    } else if (engine === 'electron') {
+      launched = await launchProfileElectron(profile, { headless: false });
+    } else {
+      launched = await launchProfile(profile, { headless: false });
+    }
+
+    const session = {
+      ...launched,
+      profile,
+      isTest: true,
+      startedAt: new Date().toISOString(),
+    };
+    running.set(id, session);
     events.emit('window-open', listWindows());
     return formatOpenResult(id, session);
   });
@@ -120,16 +167,19 @@ async function openProfile(profileId, options = {}) {
 
 function formatOpenResult(id, session) {
   const fp = session.fp || {};
+  const inProcess = Boolean(session.inProcess);
   return {
     id,
     ws: session.ws,
-    http: session.http,
+    // 同进程多窗口共享主 CDP：Playwright 必须连 page ws，browser 根 http 看不到 partition 环境窗
+    http: inProcess ? '' : session.http,
     pid: session.pid,
     name: session.profile?.name || id,
     seq: session.profile?.seq,
     engine: session.engine || 'chrome',
     coreVersion: fp.coreVersion || '131',
     headless: session.headless,
+    inProcess,
   };
 }
 
@@ -138,19 +188,23 @@ async function closeProfile(profileId) {
   const session = running.get(id);
   if (!session) {
     clearPid(id);
-    db.setProfileStatus(id, 'idle');
+    if (!isTestProfileId(id)) db.setProfileStatus(id, 'idle');
     return { ok: true };
   }
-  await killProcessAndWait(
-    session.process,
-    10000,
-    // 自研内核子进程：关窗即退出，不走 Browser.close（Electron 不支持该方法，会白等超时）
-    session.engine === 'electron' ? 0 : (session.port || 0)
-  );
+  if (session.inProcess) {
+    const { closeInProcessWindow } = require('./env-session-host');
+    await closeInProcessWindow(id);
+  } else {
+    await killProcessAndWait(
+      session.process,
+      10000,
+      session.engine === 'electron' ? 0 : (session.port || 0)
+    );
+  }
   try { session.releaseProxy?.(); } catch { /* */ }
   clearPid(id);
   running.delete(id);
-  db.setProfileStatus(id, 'idle');
+  if (!isTestProfileId(id)) db.setProfileStatus(id, 'idle');
   events.emit('window-close', listWindows());
   return { ok: true };
 }
@@ -174,6 +228,7 @@ function getSession(profileId) {
 
 module.exports = {
   openProfile,
+  openTestEnvWindow,
   closeProfile,
   showWindow,
   listWindows,

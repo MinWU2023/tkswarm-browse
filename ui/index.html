@@ -16,10 +16,11 @@
         <span class="logo" aria-hidden="true">T</span>
         <div class="brand-text">
           <h1 class="brand-name">第一页自研浏览器</h1>
-          <p class="sub">本地 API <code id="api-url">http://127.0.0.1:54345</code></p>
+          <p class="sub">本机浏览器 API <code id="api-url">http://127.0.0.1:54345</code>（固定本机，与上方登录用的线上接口不同）</p>
         </div>
       </div>
       <div class="topbar-actions">
+        <button id="btn-test-env" class="btn small ghost hidden" type="button" title="不走代理，打开测试环境窗并访问 dyyseo.com">测试环境窗</button>
         <div id="user-chip" class="user-chip hidden"></div>
         <button id="btn-logout" class="btn ghost hidden" type="button">退出</button>
       </div>
@@ -33,7 +34,7 @@
         <p class="hint">使用与 Node 项目相同的管理员账号登录，管理本机浏览器环境。</p>
         <form id="login-form" class="login-form" autocomplete="on">
           <label>API 地址
-            <input id="api-base" type="text" placeholder="http://127.0.0.1:8080/api" />
+            <input id="api-base" type="text" value="http://tkswarm-api.dyyweb.com/api" placeholder="http://tkswarm-api.dyyweb.com/api" />
           </label>
           <label>用户名
             <input id="username" type="text" autocomplete="username" />
@@ -52,6 +53,10 @@
         <span class="label">Node API Token · 填入 tkswarm-node 设置</span>
         <code id="api-token" class="token-code">—</code>
         <button id="btn-copy-token" class="btn small ghost" type="button">复制</button>
+      </div>
+
+      <div class="path-bar muted" id="path-bar" style="margin:0 0 12px;padding:10px 14px;background:#f6f3ef;border-radius:10px;font-size:12px;line-height:1.6;word-break:break-all">
+        数据目录与设置路径加载中…
       </div>
 
       <div class="meta-strip" id="meta-strip">

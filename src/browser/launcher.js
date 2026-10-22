@@ -66,6 +66,34 @@ async function waitForPageTarget(port, timeoutMs = 15000) {
   return null;
 }
 
+/** Electron 自研内核：等 page target 就绪（含 URL），Playwright connectOverCDP 依赖 Target 事件 */
+async function waitForCdpReady(port, timeoutMs = 45000, options = {}) {
+  const excludeAboutBlank = options.excludeAboutBlank !== false;
+  const urlIncludes = String(options.urlIncludes || '').trim();
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const list = await fetchJson(`http://127.0.0.1:${port}/json/list`);
+      const pages = Array.isArray(list)
+        ? list.filter((t) => t.type === 'page' && t.webSocketDebuggerUrl)
+        : [];
+      const page = pages.find((t) => {
+        const url = String(t.url || '');
+        if (!url || url.startsWith('devtools://')) return false;
+        if (excludeAboutBlank && (url === 'about:blank' || url === 'about:srcdoc')) return false;
+        if (urlIncludes && !url.includes(urlIncludes)) return false;
+        return true;
+      });
+      if (page?.webSocketDebuggerUrl) return page;
+    } catch { /* retry */ }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  const hint = urlIncludes
+    ? `（等待页面加载 ${urlIncludes} 超时，请检查网络/代理后重试）`
+    : '';
+  throw new Error(`CDP page target 未就绪（Playwright 无法连接，请重启浏览器客户端后重试）${hint}`);
+}
+
 /**
  * @returns {Promise<{ pid, port, ws, http, headless, userDataDir, process, userAgent, timezone, fp, releaseProxy }>}
  */
@@ -88,6 +116,7 @@ async function launchProfile(profile, options = {}) {
 
   const args = [
     `--remote-debugging-port=${port}`,
+    '--remote-allow-origins=*',
     `--user-data-dir=${userDataDir}`,
     '--no-first-run',
     '--no-default-browser-check',
@@ -243,8 +272,10 @@ module.exports = {
   profileDir,
   clearPid,
   isPidAlive,
+  fetchJson,
   // 供 electron-launcher 复用同一套 CDP 等待/注入流程
   getFreePort,
   waitForDevtools,
   waitForPageTarget,
+  waitForCdpReady,
 };

@@ -2,8 +2,15 @@ const db = require('../db');
 const { TKSWARM_API_BASE } = require('../config');
 const { writeSettings } = require('../settings');
 
+function normalizeApiBase(raw) {
+  const fallback = String(TKSWARM_API_BASE).replace(/\/+$/, '');
+  const base = String(raw || fallback).trim().replace(/\/+$/, '');
+  if (/127\.0\.0\.1|localhost/i.test(base)) return fallback;
+  return base || fallback;
+}
+
 async function login({ apiBase, username, password, captcha, captchaKey }) {
-  const base = String(apiBase || TKSWARM_API_BASE).replace(/\/+$/, '');
+  const base = normalizeApiBase(apiBase);
   const res = await fetch(`${base}/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
@@ -30,6 +37,16 @@ async function login({ apiBase, username, password, captcha, captchaKey }) {
   if (token) {
     db.setApiToken(token);
     writeSettings({ apiToken: token, apiBase: base });
+    // 与 Node 共用 PHP 登录 Token，写入用户设置后 Node 无需再手动复制
+    fetch(`${base}/settings`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ tkswarmBrowserApiToken: token }),
+    }).catch(() => {});
   }
   return { token, user: db.getCurrentUser() };
 }
