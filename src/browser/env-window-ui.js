@@ -159,6 +159,61 @@ async function looksLikeBlankWhite(browserWindow) {
   }
 }
 
+async function loadStatusPageOnWebContents(webContents, profileId, html) {
+  if (!webContents || webContents.isDestroyed()) return;
+  try {
+    await webContents.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+    return;
+  } catch (error) {
+    appendEnvLog(profileId, `状态页 data: 失败: ${error?.message || error}`);
+  }
+  try {
+    const file = writeStatusHtml(profileId, html);
+    const { pathToFileURL } = require('node:url');
+    await webContents.loadURL(pathToFileURL(file).href);
+  } catch (error) {
+    appendEnvLog(profileId, `状态页 file: 失败: ${error?.message || error}`);
+  }
+}
+
+async function showDiagnosticOnWebContents(webContents, profileId, opts = {}) {
+  if (!webContents || webContents.isDestroyed()) return;
+  appendEnvLog(profileId, `显示诊断页：${opts.reason || ''} ${opts.detail || ''}`.trim());
+  await loadStatusPageOnWebContents(webContents, profileId, buildDiagnosticHtml(profileId, opts));
+}
+
+async function inspectBlankContentOnWc(webContents, profileId, opts, attempt = 0) {
+  if (!webContents || webContents.isDestroyed()) return false;
+  let info = null;
+  try {
+    info = await webContents.executeJavaScript(
+      '({ href: location.href, text: (document.body ? document.body.innerText : "").trim().length,'
+      + ' html: (document.documentElement ? document.documentElement.outerHTML : "").length })',
+      true
+    );
+  } catch (error) {
+    appendEnvLog(profileId, `内容检查失败: ${error?.message || error}`);
+    return false;
+  }
+  if (!info) return false;
+  appendEnvLog(profileId, `内容检查 href=${info.href} 文本=${info.text} html=${info.html}`);
+
+  if (info.html < 600) {
+    if (attempt < 2) {
+      await new Promise((r) => setTimeout(r, 6000));
+      return inspectBlankContentOnWc(webContents, profileId, opts, attempt + 1);
+    }
+    await showDiagnosticOnWebContents(webContents, profileId, {
+      ...opts,
+      reason: '页面已加载，但内容为空',
+      detail: `DOM 长度 ${info.html}（${info.href}）`,
+      url: info.href,
+    });
+    return true;
+  }
+  return false;
+}
+
 async function inspectBlankContent(browserWindow, profileId, opts, attempt = 0) {
   if (!browserWindow || browserWindow.isDestroyed()) return false;
   let info = null;
@@ -206,9 +261,12 @@ module.exports = {
   envLogPath,
   LOADING_HTML,
   loadStatusPage,
+  loadStatusPageOnWebContents,
   loadBuiltinHtml,
   waitForMainFrameLoad,
   revealEnvWindow,
   showDiagnostic,
+  showDiagnosticOnWebContents,
   inspectBlankContent,
+  inspectBlankContentOnWc,
 };

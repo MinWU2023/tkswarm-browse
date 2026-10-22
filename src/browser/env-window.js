@@ -14,7 +14,9 @@
  *  3) DOM 有内容但窗口渲染成纯色（显卡/远程桌面合成问题）→ 提示开启软件渲染
  * 日志：<data>/logs/env-<环境ID>.log
  */
-const { app, BrowserWindow, Menu, session } = require('electron');
+const { app, session } = require('electron');
+const { createEnvChrome } = require('./env-chrome');
+const { showDiagnosticOnWebContents, inspectBlankContentOnWc } = require('./env-window-ui');
 const fs = require('node:fs');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
@@ -199,112 +201,64 @@ function showDiagnostic(browserWindow, opts) {
   return loadBuiltinHtml(browserWindow, buildDiagnosticHtml(opts));
 }
 
-/* ---------------- 窗口 ---------------- */
-function createEnvWindow() {
-  Menu.setApplicationMenu(null);
-  const browserWindow = new BrowserWindow({
-    width: Number(cfg.width) || 1280,
-    height: Number(cfg.height) || 800,
-    show: !cfg.headless,
-    paintWhenInitiallyHidden: true,
-    title: windowTitle,
-    autoHideMenuBar: true,
-    // 不是纯白：即使渲染管线出问题也不会是刺眼的白色空白
-    backgroundColor: '#f5f6f8',
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false,
-      backgroundThrottling: false,
-    },
-  });
-  try { browserWindow.setMenuBarVisibility(false); } catch { /* */ }
-  if (!cfg.headless) {
-    browserWindow.once('ready-to-show', () => {
-      try { browserWindow.show(); } catch { /* */ }
-      logLine('窗口已显示');
-    });
-  }
-  // 保持窗口标题为环境名，不被站点标题顶掉
-  browserWindow.on('page-title-updated', (event) => {
-    event.preventDefault();
-    try { browserWindow.setTitle(windowTitle); } catch { /* */ }
-  });
-  browserWindow.on('closed', () => {
-    win = null;
-    app.quit();
-  });
-  return browserWindow;
-}
+function bindContentWatchers(webContents) {
+  if (!webContents) return;
+  const diagOpts = {
+    url: targetUrl,
+    proxy: cfg.proxyServer || '直连（未绑定代理）',
+    userDataDir: String(cfg.userDataDir || ''),
+  };
 
-/** 截图判断是否「整窗接近纯白」（DOM 有内容却白屏 = 合成/显卡问题） */
-async function looksLikeBlankWhite(browserWindow) {
-  try {
-    const image = await browserWindow.webContents.capturePage();
-    const size = image.getSize();
-    if (!size.width || !size.height) return false;
-    const bitmap = image.toBitmap(); // BGRA
-    let min = 255;
-    let max = 0;
-    let sum = 0;
-    let n = 0;
-    for (let i = 0; i + 3 < bitmap.length; i += 4 * 53) {
-      const v = (bitmap[i] + bitmap[i + 1] + bitmap[i + 2]) / 3;
-      if (v < min) min = v;
-      if (v > max) max = v;
-      sum += v;
-      n += 1;
-    }
-    const avg = n ? sum / n : 0;
-    // 纯白 + 几乎无对比：只有真白屏才会同时满足，避免把「页面还在淡入」误判
-    return max - min < 6 && avg >= 235;
-  } catch (error) {
-    logLine(`截图检测失败: ${error?.message || error}`);
-    return false;
-  }
-}
-
-/** 页面加载完但可能是空白的兜底检查 */
-async function inspectPageContent(browserWindow, attempt = 0) {
-  if (settled || !browserWindow || browserWindow.isDestroyed()) return;
-  let info = null;
-  try {
-    info = await browserWindow.webContents.executeJavaScript(
-      '({ href: location.href, text: (document.body ? document.body.innerText : "").trim().length, html: (document.documentElement ? document.documentElement.outerHTML : "").length })',
-      true
-    );
-  } catch (error) {
-    logLine(`内容检查失败: ${error?.message || error}`);
-    return;
-  }
-  if (!info) return;
-  logLine(`内容检查 href=${info.href} 文本长度=${info.text} HTML长度=${info.html}`);
-
-  // DOM 几乎是空的：登录墙 / 反爬 / 站点脚本挂了。
-  // 有些站点先给空壳再水合，所以隔 6 秒复查两次再下结论。
-  if (info.html < 600) {
-    if (attempt < 2) {
-      setTimeout(() => { inspectPageContent(browserWindow, attempt + 1); }, 6000);
-      return;
-    }
+  webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    if (!isMainFrame) return;
+    if (errorCode === -3) return;
+    if (!validatedURL || validatedURL.startsWith('data:') || validatedURL.startsWith('file:')) return;
+    if (validatedURL === 'about:blank') return;
+    logLine(`did-fail-load code=${errorCode} desc=${errorDescription} url=${validatedURL}`);
+    if (settled) return;
     settled = true;
-    await showDiagnostic(browserWindow, {
-      reason: '页面已加载，但内容为空',
-      detail: `DOM 长度 ${info.html}（当前地址 ${info.href}）`,
-      url: info.href,
-    });
-    return;
-  }
+    showDiagnosticOnWebContents(webContents, profileId, {
+      ...diagOpts,
+      reason: '页面加载失败',
+      detail: `${errorDescription}（错误码 ${errorCode}）`,
+      url: validatedURL,
+    }).catch(() => {});
+  });
 
-  // DOM 有内容却整窗纯白：显卡/远程桌面合成问题
-  if (!cfg.headless && (await looksLikeBlankWhite(browserWindow))) {
+  webContents.on('render-process-gone', (event, details) => {
+    logLine(`render-process-gone reason=${details?.reason} exitCode=${details?.exitCode}`);
+    if (settled) return;
     settled = true;
-    await showDiagnostic(browserWindow, {
-      reason: '页面有内容，但窗口渲染成纯白',
-      detail: '疑似显卡/远程桌面硬件合成问题，请按第 4 条开启软件渲染',
-      url: info.href,
-    });
-  }
+    showDiagnosticOnWebContents(webContents, profileId, {
+      ...diagOpts,
+      reason: '渲染进程已退出',
+      detail: `${details?.reason || 'unknown'}${details?.exitCode != null ? `（exitCode ${details.exitCode}）` : ''}`,
+      url: targetUrl,
+    }).catch(() => {});
+  });
+
+  const hardTimeout = setTimeout(() => {
+    if (settled) return;
+    settled = true;
+    showDiagnosticOnWebContents(webContents, profileId, {
+      ...diagOpts,
+      reason: '页面加载超时',
+      detail: '90 秒内没有加载完成，通常是网络或账号代理不可用',
+      url: targetUrl,
+    }).catch(() => {});
+  }, 90000);
+
+  let inspected = false;
+  webContents.on('did-finish-load', () => {
+    const href = webContents.getURL();
+    if (href.startsWith('data:') || href.startsWith('file:')) return;
+    clearTimeout(hardTimeout);
+    if (inspected || settled) return;
+    inspected = true;
+    setTimeout(() => {
+      inspectBlankContentOnWc(webContents, profileId, diagOpts).catch(() => {});
+    }, 2500);
+  });
 }
 
 /* ---------------- 启动 ---------------- */
@@ -330,95 +284,28 @@ app.whenReady().then(async () => {
     }
   }
 
-  win = createEnvWindow();
-  const webContents = win.webContents;
-
-  // 主框架加载失败（忽略 -3 ERR_ABORTED：站点自身重定向/新导航会打断上一次加载，是正常现象）
-  webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL, isMainFrame) => {
-    if (!isMainFrame) return;
-    if (errorCode === -3) return;
-    if (!validatedURL || validatedURL.startsWith('data:') || validatedURL.startsWith('file:')) return;
-    if (validatedURL === 'about:blank') return;
-    logLine(`did-fail-load code=${errorCode} desc=${errorDescription} url=${validatedURL}`);
-    if (settled) return;
-    settled = true;
-    showDiagnostic(win, {
-      reason: '页面加载失败',
-      detail: `${errorDescription}（错误码 ${errorCode}）`,
-      url: validatedURL,
-    }).catch(() => {});
+  const chrome = await createEnvChrome({
+    profileId,
+    userDataDir: String(cfg.userDataDir || ''),
+    width: Number(cfg.width) || 1280,
+    height: Number(cfg.height) || 800,
+    windowTitle,
+    startUrl: targetUrl,
+    ses,
+    headless: Boolean(cfg.headless),
+    log: logLine,
+  });
+  win = chrome.window;
+  win.on('closed', () => {
+    win = null;
+    app.quit();
   });
 
-  webContents.on('render-process-gone', (event, details) => {
-    logLine(`render-process-gone reason=${details?.reason} exitCode=${details?.exitCode}`);
-    if (settled) return;
-    settled = true;
-    showDiagnostic(win, {
-      reason: '渲染进程已退出',
-      detail: `${details?.reason || 'unknown'}${details?.exitCode != null ? `（exitCode ${details.exitCode}）` : ''}`,
-      url: targetUrl,
-    }).catch(() => {});
-  });
-
-  webContents.on('unresponsive', () => logLine('窗口无响应（unresponsive）'));
-  webContents.on('responsive', () => logLine('窗口恢复响应'));
-
-  // 先让「加载中」页面真正画出来，再导航：避免导航期间整窗纯白
-  const loadingHtml = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>加载中</title>'
-    + '<style>body{font-family:system-ui,"Microsoft YaHei",sans-serif;display:flex;align-items:center;justify-content:center;'
-    + 'height:100vh;margin:0;color:#6b564a;background:#f5f6f8}i{display:inline-block;width:14px;height:14px;margin-right:10px;'
-    + 'border-radius:50%;border:2px solid #f7921e;border-top-color:transparent;animation:s .9s linear infinite;vertical-align:-2px}'
-    + '@keyframes s{to{transform:rotate(360deg)}}</style></head><body><div><i></i>正在打开页面，请稍候…</div></body></html>';
-
-  try {
-    await loadBuiltinHtml(win, loadingHtml);
-    logLine('加载中页面已就绪');
-  } catch (error) {
-    logLine(`加载中页面失败: ${error?.message || error}`);
-  }
-
-  const hardTimeout = setTimeout(() => {
-    if (settled) return;
-    settled = true;
-    showDiagnostic(win, {
-      reason: '页面加载超时',
-      detail: '90 秒内没有加载完成，通常是网络或账号代理不可用',
-      url: targetUrl,
-    }).catch(() => {});
-  }, 90000);
-
-  try {
-    const nav = win.loadURL(targetUrl);
-    if (nav && typeof nav.catch === 'function') {
-      nav.catch((error) => {
-        const code = String(error?.code || '');
-        logLine(`loadURL 中断 code=${code} msg=${error?.message || error}`);
-        // -3 是重定向/二次导航导致的正常中断
-        if (code === '-3' || code === 'ERR_ABORTED') return;
-        if (settled) return;
-        settled = true;
-        showDiagnostic(win, {
-          reason: '页面加载失败',
-          detail: `${error?.message || error}${code ? `（${code}）` : ''}`,
-          url: targetUrl,
-        }).catch(() => {});
-      });
-    }
-  } catch (error) {
-    logLine(`loadURL 抛错: ${error?.message || error}`);
-    settled = true;
-    await showDiagnostic(win, { reason: '页面加载失败', detail: error?.message || String(error), url: targetUrl });
-  }
-
-  let inspected = false;
-  webContents.on('did-finish-load', () => {
-    const href = webContents.getURL();
-    if (href.startsWith('data:') || href.startsWith('file:')) return;
-    clearTimeout(hardTimeout);
-    if (inspected || settled) return;
-    inspected = true;
-    setTimeout(() => { inspectPageContent(win); }, 2500);
-  });
+  const contentWc = chrome.getActiveWebContents();
+  bindContentWatchers(contentWc);
+  contentWc?.on('unresponsive', () => logLine('窗口无响应（unresponsive）'));
+  contentWc?.on('responsive', () => logLine('窗口恢复响应'));
+  logLine('环境浏览器外壳已就绪');
 });
 
 app.on('window-all-closed', () => app.quit());

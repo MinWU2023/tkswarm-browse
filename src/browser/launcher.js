@@ -67,6 +67,10 @@ async function waitForPageTarget(port, timeoutMs = 15000) {
 }
 
 /** Electron 自研内核：等 page target 就绪（含 URL），Playwright connectOverCDP 依赖 Target 事件 */
+function isEnvChromeShellUrl(url) {
+  return /env-shell\.html/i.test(String(url || ''));
+}
+
 async function waitForCdpReady(port, timeoutMs = 45000, options = {}) {
   const excludeAboutBlank = options.excludeAboutBlank !== false;
   const urlIncludes = String(options.urlIncludes || '').trim();
@@ -80,6 +84,7 @@ async function waitForCdpReady(port, timeoutMs = 45000, options = {}) {
       const page = pages.find((t) => {
         const url = String(t.url || '');
         if (!url || url.startsWith('devtools://')) return false;
+        if (isEnvChromeShellUrl(url)) return false;
         if (excludeAboutBlank && (url === 'about:blank' || url === 'about:srcdoc')) return false;
         if (urlIncludes && !url.includes(urlIncludes)) return false;
         return true;
@@ -278,4 +283,5 @@ module.exports = {
   waitForDevtools,
   waitForPageTarget,
   waitForCdpReady,
+  isEnvChromeShellUrl,
 };

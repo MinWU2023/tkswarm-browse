@@ -117,13 +117,13 @@ router.post('/api/windows/:id/close', async (req, res) => {
   }
 });
 
-/** 控制台顶部：直连测试环境窗（不走代理，打开 https://www.dyyseo.com） */
+/** 控制台顶部：直连测试环境窗（不走代理，打开 TkSwarm 官网） */
 router.post('/api/test/open-env-window', async (req, res) => {
   const user = db.getCurrentUser();
   if (!user) return res.json({ ok: false, message: '请先登录' });
   try {
     const data = await manager.openTestEnvWindow();
-    res.json({ ok: true, data, url: 'https://www.dyyseo.com' });
+    res.json({ ok: true, data, url: 'http://tkswarm-api.dyyweb.com/' });
   } catch (e) {
     res.json({ ok: false, message: e.message || '测试环境窗打开失败' });
   }

@@ -5,14 +5,13 @@
 const { mergeFingerprint, parseResolution, buildUserAgent } = require('./fingerprint');
 const { resolveChromeProxy } = require('./proxy-auth');
 const { profileDir, fetchJson } = require('./launcher');
+const { createEnvChrome } = require('./env-chrome');
+const { isEnvChromeShellUrl } = require('./launcher');
 const {
   appendEnvLog,
-  LOADING_HTML,
-  loadStatusPage,
-  waitForMainFrameLoad,
+  showDiagnosticOnWebContents,
+  inspectBlankContentOnWc,
   revealEnvWindow,
-  showDiagnostic,
-  inspectBlankContent,
 } = require('./env-window-ui');
 
 function electron() {
@@ -32,14 +31,14 @@ function pickEnvPageTarget(pages, webContentsId, titleHint) {
   const wantId = String(webContentsId);
   const mine = pages.filter((t) => t.type === 'page' && t.webSocketDebuggerUrl);
   const byId = mine.find((t) => String(t.id) === wantId);
-  if (byId) return byId;
+  if (byId && !isEnvChromeShellUrl(byId.url)) return byId;
   if (titleHint) {
-    const byTitle = mine.find((t) => String(t.title || '').includes(titleHint));
+    const byTitle = mine.find((t) => String(t.title || '').includes(titleHint) && !isEnvChromeShellUrl(t.url));
     if (byTitle) return byTitle;
   }
   return mine.find((t) => {
     const url = String(t.url || '');
-    return url && !url.startsWith('devtools://') && !/index\.html/i.test(url);
+    return url && !url.startsWith('devtools://') && !/index\.html/i.test(url) && !isEnvChromeShellUrl(url);
   }) || null;
 }
 
@@ -71,7 +70,8 @@ async function launchProfileInProcess(profile, options = {}) {
   const windowTitle = `${displayName} - 第一页自研浏览器`;
   const existing = windows.get(id);
   if (existing?.window && !existing.window.isDestroyed()) {
-    const page = await waitForPageWs(existing.window.webContents.id, displayName, 8000).catch(() => null);
+    const wc = existing.getContentWc?.() || existing.chrome?.getActiveWebContents?.();
+    const page = await waitForPageWs(wc?.id, displayName, 8000).catch(() => null);
     if (page?.webSocketDebuggerUrl) {
       return formatLaunchResult(profile, existing.window, page.webSocketDebuggerUrl, options, existing.releaseProxy);
     }
@@ -87,7 +87,6 @@ async function launchProfileInProcess(profile, options = {}) {
   const startUrl = String(profile.platform || 'https://www.tiktok.com');
   const userDataDir = profileDir(id);
   const proxy = await resolveChromeProxy(profile);
-  const { BrowserWindow } = electron();
 
   appendEnvLog(id, `=== 同进程打开环境 ${id}（${displayName}） startUrl=${startUrl} ===`);
 
@@ -98,26 +97,8 @@ async function launchProfileInProcess(profile, options = {}) {
     userDataDir,
   };
 
-  // 只用 partition 创建隔离 session；禁止同时传 session + partition（会导致渲染异常/白屏）
-  const win = new BrowserWindow({
-    width,
-    height,
-    show: !headless,
-    paintWhenInitiallyHidden: true,
-    title: windowTitle,
-    autoHideMenuBar: true,
-    backgroundColor: '#f5f6f8',
-    webPreferences: {
-      partition: `persist:env-${id}`,
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false,
-      backgroundThrottling: false,
-    },
-  });
-  try { win.setMenuBarVisibility(false); } catch { /* */ }
-
-  const ses = win.webContents.session;
+  const { session: { fromPartition } } = electron();
+  const ses = fromPartition(`persist:env-${id}`);
   if (userAgent) {
     try { ses.setUserAgent(userAgent, locale); } catch { ses.setUserAgent(userAgent); }
   }
@@ -129,109 +110,83 @@ async function launchProfileInProcess(profile, options = {}) {
     await ses.setProxy({ proxyMode: 'direct' });
   }
 
-  win.once('ready-to-show', () => {
-    revealEnvWindow(win, id, { headless }).catch(() => {});
+  const chrome = await createEnvChrome({
+    profileId: id,
+    userDataDir,
+    width,
+    height,
+    windowTitle,
+    startUrl,
+    ses,
+    headless,
+    log: (msg) => appendEnvLog(id, msg),
   });
+  const win = chrome.window;
 
-  win.on('page-title-updated', (e) => {
-    e.preventDefault();
-    try { win.setTitle(windowTitle); } catch { /* */ }
-  });
   win.on('closed', () => {
     windows.delete(id);
     try { proxy.release?.(); } catch { /* */ }
   });
 
-  const wc = win.webContents;
-
-  wc.on('did-fail-load', (event, code, desc, url, isMainFrame) => {
-    if (!isMainFrame || code === -3) return;
-    if (!url || url.startsWith('file:') || url.startsWith('data:')) return;
-    if (settled) return;
-    settled = true;
-    appendEnvLog(id, `did-fail-load code=${code} url=${url} ${desc}`);
-    showDiagnostic(win, id, {
-      ...diagOpts,
-      reason: '页面加载失败',
-      detail: `${desc}（错误码 ${code}）`,
-      url,
-    }).catch(() => {});
-  });
-
-  wc.on('render-process-gone', (event, details) => {
-    if (settled) return;
-    settled = true;
-    appendEnvLog(id, `render-process-gone ${details?.reason} exit=${details?.exitCode}`);
-    showDiagnostic(win, id, {
-      ...diagOpts,
-      reason: '渲染进程已退出',
-      detail: String(details?.reason || 'unknown'),
-    }).catch(() => {});
-  });
-
-  try {
-    await loadStatusPage(win, id, LOADING_HTML);
-    await waitForMainFrameLoad(wc);
-    appendEnvLog(id, '加载中页面已就绪');
-    await revealEnvWindow(win, id, { headless });
-  } catch (error) {
-    appendEnvLog(id, `加载中页面失败: ${error?.message || error}`);
-    await showDiagnostic(win, id, {
-      ...diagOpts,
-      reason: '加载中页面失败',
-      detail: error?.message || String(error),
-    }).catch(() => {});
-  }
-
-  const hardTimeout = setTimeout(() => {
-    if (settled) return;
-    settled = true;
-    showDiagnostic(win, id, {
-      ...diagOpts,
-      reason: '页面加载超时',
-      detail: '90 秒内没有加载完成，通常是网络或账号代理不可用',
-    }).catch(() => {});
-  }, 90000);
-
-  let inspected = false;
-  wc.on('did-finish-load', () => {
-    const href = wc.getURL();
-    if (href.startsWith('file:') || href.startsWith('data:')) return;
-    clearTimeout(hardTimeout);
-    if (inspected || settled) return;
-    inspected = true;
-    setTimeout(() => {
-      inspectBlankContent(win, id, diagOpts).catch(() => {});
-    }, 2500);
-  });
-
-  try {
-    const nav = win.loadURL(startUrl, { timeout: 60000 });
-    if (nav && typeof nav.catch === 'function') {
-      nav.catch((error) => {
-        const code = String(error?.code || '');
-        if (code === '-3' || code === 'ERR_ABORTED') return;
-        if (settled) return;
-        settled = true;
-        appendEnvLog(id, `loadURL 失败: ${error?.message || error}`);
-        showDiagnostic(win, id, {
-          ...diagOpts,
-          reason: '页面加载失败',
-          detail: error?.message || String(error),
-        }).catch(() => {});
-      });
-    }
-  } catch (error) {
-    settled = true;
-    await showDiagnostic(win, id, {
-      ...diagOpts,
-      reason: '页面加载失败',
-      detail: error?.message || String(error),
+  const bindContentEvents = (wc) => {
+    if (!wc) return;
+    wc.on('did-fail-load', (event, code, desc, url, isMainFrame) => {
+      if (!isMainFrame || code === -3) return;
+      if (!url || url.startsWith('file:') || url.startsWith('data:')) return;
+      if (settled) return;
+      settled = true;
+      appendEnvLog(id, `did-fail-load code=${code} url=${url} ${desc}`);
+      showDiagnosticOnWebContents(wc, id, {
+        ...diagOpts,
+        reason: '页面加载失败',
+        detail: `${desc}（错误码 ${code}）`,
+        url,
+      }).catch(() => {});
     });
-  }
+    wc.on('render-process-gone', (event, details) => {
+      if (settled) return;
+      settled = true;
+      appendEnvLog(id, `render-process-gone ${details?.reason} exit=${details?.exitCode}`);
+      showDiagnosticOnWebContents(wc, id, {
+        ...diagOpts,
+        reason: '渲染进程已退出',
+        detail: String(details?.reason || 'unknown'),
+      }).catch(() => {});
+    });
+    const hardTimeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      showDiagnosticOnWebContents(wc, id, {
+        ...diagOpts,
+        reason: '页面加载超时',
+        detail: '90 秒内没有加载完成，通常是网络或账号代理不可用',
+      }).catch(() => {});
+    }, 90000);
+    let inspected = false;
+    wc.on('did-finish-load', () => {
+      const href = wc.getURL();
+      if (href.startsWith('file:') || href.startsWith('data:')) return;
+      clearTimeout(hardTimeout);
+      if (inspected || settled) return;
+      inspected = true;
+      setTimeout(() => {
+        inspectBlankContentOnWc(wc, id, diagOpts).catch(() => {});
+      }, 2500);
+    });
+  };
 
-  const page = await waitForPageWs(win.webContents.id, displayName, 45000);
-  windows.set(id, { window: win, releaseProxy: proxy.release, profile });
+  bindContentEvents(chrome.getActiveWebContents());
+  await revealEnvWindow(win, id, { headless });
+
+  const activeWc = chrome.getActiveWebContents();
+  const page = await waitForPageWs(activeWc?.id, displayName, 45000);
+  windows.set(id, {
+    window: win,
+    chrome,
+    releaseProxy: proxy.release,
+    profile,
+    getContentWc: () => chrome.getActiveWebContents(),
+  });
   appendEnvLog(id, `CDP 就绪 ws=${page.webSocketDebuggerUrl} url=${page.url || ''}`);
 
   return formatLaunchResult(profile, win, page.webSocketDebuggerUrl, options, proxy.release, {

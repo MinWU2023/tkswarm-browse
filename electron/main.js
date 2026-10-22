@@ -126,39 +126,21 @@ if (IS_ENV_PROCESS) {
   }
 
   function createAppMenu() {
-    const template = [
-      {
-        label: '调试',
-        submenu: [
-          {
-            label: '打开测试环境窗（直连 dyyseo.com）',
-            click: () => {
-              manager.openTestEnvWindow()
-                .then(() => mainWindow?.webContents.send('windows-updated'))
-                .catch((error) => {
-                  console.error('[测试环境窗]', error);
-                  mainWindow?.webContents.send('test-env-error', String(error?.message || error));
-                });
-            },
-          },
-          {
-            label: '关闭测试环境窗',
-            click: () => {
-              const { TEST_PROFILE_ID } = require('../src/browser/test-env');
-              manager.closeProfile(TEST_PROFILE_ID).catch(() => {});
-            },
-          },
-        ],
+    const { buildMainAppMenu } = require('../src/browser/app-menu-zh');
+    const { TEST_PROFILE_ID } = require('../src/browser/test-env');
+    Menu.setApplicationMenu(buildMainAppMenu({
+      onTestEnv: () => {
+        manager.openTestEnvWindow()
+          .then(() => mainWindow?.webContents.send('windows-updated'))
+          .catch((error) => {
+            console.error('[测试环境窗]', error);
+            mainWindow?.webContents.send('test-env-error', String(error?.message || error));
+          });
       },
-      {
-        label: '窗口',
-        submenu: [
-          { role: 'minimize' },
-          { role: 'close' },
-        ],
+      onCloseTestEnv: () => {
+        manager.closeProfile(TEST_PROFILE_ID).catch(() => {});
       },
-    ];
-    Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+    }));
   }
 
   app.whenReady().then(async () => {

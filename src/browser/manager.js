@@ -129,7 +129,7 @@ async function openProfile(profileId, options = {}) {
   });
 }
 
-/** 顶部菜单 / 控制台：直连测试环境窗（不走代理，打开 dyyseo.com） */
+/** 顶部菜单 / 控制台：直连测试环境窗（不走代理，打开 TkSwarm 官网） */
 async function openTestEnvWindow() {
   const profile = buildTestProfile();
   const id = TEST_PROFILE_ID;

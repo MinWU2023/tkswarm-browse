@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>环境浏览器</title>
+  <link rel="stylesheet" href="env-shell.css" />
+</head>
+<body>
+  <header class="chrome-bar">
+    <div class="chrome-row chrome-nav">
+      <button type="button" class="nav-btn" id="btn-back" title="后退" disabled>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
+      </button>
+      <button type="button" class="nav-btn" id="btn-forward" title="前进" disabled>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
+      </button>
+      <button type="button" class="nav-btn" id="btn-reload" title="刷新">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+      </button>
+      <button type="button" class="nav-btn" id="btn-home" title="主页">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 10.5L12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1v-9.5z"/></svg>
+      </button>
+      <form id="addr-form" class="addr-form">
+        <span class="addr-lock" title="安全连接">🔒</span>
+        <input id="addr-input" type="text" placeholder="输入网址或搜索" spellcheck="false" autocomplete="off" />
+        <button type="submit" class="addr-go" title="前往">前往</button>
+      </form>
+      <button type="button" class="nav-btn" id="btn-history" title="浏览历史">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+      </button>
+      <button type="button" class="nav-btn nav-close" id="btn-close-win" title="关闭窗口">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="chrome-row chrome-tabs">
+      <div id="tab-strip" class="tab-strip"></div>
+      <button type="button" class="tab-new" id="btn-new-tab" title="新标签页">+</button>
+    </div>
+  </header>
+
+  <aside id="history-panel" class="history-panel hidden">
+    <div class="history-head">
+      <strong>浏览历史</strong>
+      <button type="button" id="btn-clear-history" class="link-btn">清空</button>
+      <button type="button" id="btn-close-history" class="link-btn">关闭</button>
+    </div>
+    <ul id="history-list" class="history-list"></ul>
+  </aside>
+
+  <script src="env-shell.js"></script>
+</body>
+</html>
