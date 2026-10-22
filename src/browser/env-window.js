@@ -16,6 +16,7 @@
  */
 const { app, session } = require('electron');
 const { createEnvChrome } = require('./env-chrome');
+const { resolveChromeProxy } = require('./proxy-auth');
 const { showDiagnosticOnWebContents, inspectBlankContentOnWc } = require('./env-window-ui');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -120,6 +121,7 @@ const targetUrl = String(cfg.startUrl || 'https://www.tiktok.com');
 
 let win = null;
 let settled = false;
+let releaseProxy = () => {};
 
 /* ---------------- 诊断页 ---------------- */
 function buildDiagnosticHtml(opts) {
@@ -201,11 +203,11 @@ function showDiagnostic(browserWindow, opts) {
   return loadBuiltinHtml(browserWindow, buildDiagnosticHtml(opts));
 }
 
-function bindContentWatchers(webContents) {
+function bindContentWatchers(webContents, proxyDisplay) {
   if (!webContents) return;
   const diagOpts = {
     url: targetUrl,
-    proxy: cfg.proxyServer || '直连（未绑定代理）',
+    proxy: proxyDisplay || '直连（未绑定代理）',
     userDataDir: String(cfg.userDataDir || ''),
   };
 
@@ -271,14 +273,27 @@ app.whenReady().then(async () => {
       ses.setUserAgent(String(cfg.userAgent), String(cfg.acceptLanguages || 'en-US'));
     } catch { /* 老版本 Electron 只支持单参数 */ }
   }
-  if (cfg.proxyServer) {
+  let proxyRules = String(cfg.proxyServer || '').trim();
+  if (cfg.proxyMeta && cfg.proxyMeta.proxy_host) {
+    try {
+      const local = await resolveChromeProxy(cfg.proxyMeta);
+      releaseProxy = local.release || (() => {});
+      if (local.proxyArg) {
+        proxyRules = String(local.proxyArg).replace(/^--proxy-server=/, '');
+        logLine(`子进程代理桥已启动: ${proxyRules} → 上游 ${cfg.proxyMeta.proxy_type}://${cfg.proxyMeta.proxy_host}:${cfg.proxyMeta.proxy_port}`);
+      }
+    } catch (error) {
+      logLine(`子进程代理桥启动失败: ${error?.message || error}`);
+    }
+  }
+  if (proxyRules) {
     try {
       await ses.setProxy({
         proxyMode: 'fixed_servers',
-        proxyRules: String(cfg.proxyServer),
+        proxyRules,
         proxyBypassRules: '<-loopback>',
       });
-      logLine(`代理已设置: ${cfg.proxyServer}`);
+      logLine(`代理已设置: ${proxyRules}`);
     } catch (error) {
       logLine(`代理设置失败: ${error?.message || error}`);
     }
@@ -302,7 +317,10 @@ app.whenReady().then(async () => {
   });
 
   const contentWc = chrome.getActiveWebContents();
-  bindContentWatchers(contentWc);
+  const proxyDisplay = cfg.proxyMeta?.proxy_host
+    ? `上游 ${cfg.proxyMeta.proxy_type}://${cfg.proxyMeta.proxy_host}:${cfg.proxyMeta.proxy_port}${proxyRules ? `（子进程桥 ${proxyRules}）` : ''}`
+    : (proxyRules || cfg.proxyServer || '直连（未绑定代理）');
+  bindContentWatchers(contentWc, proxyDisplay);
   contentWc?.on('unresponsive', () => logLine('窗口无响应（unresponsive）'));
   contentWc?.on('responsive', () => logLine('窗口恢复响应'));
   logLine('环境浏览器外壳已就绪');
@@ -310,5 +328,6 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => app.quit());
 app.on('before-quit', () => {
+  try { releaseProxy(); } catch { /* */ }
   try { win?.destroy(); } catch { /* */ }
 });

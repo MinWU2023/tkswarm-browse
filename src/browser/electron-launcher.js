@@ -6,7 +6,7 @@ const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { mergeFingerprint, parseResolution, buildUserAgent } = require('./fingerprint');
-const { resolveChromeProxy } = require('./proxy-auth');
+const { resolveChromeProxy, needsAuthBridge } = require('./proxy-auth');
 const { reclaimBeforeOpen, writePid, clearPid } = require('./process-guard');
 const { DATA_ROOT } = require('../config');
 const { wantSoftwareRender, isRemoteSession } = require('./render-flags');
@@ -89,7 +89,20 @@ async function launchProfileElectron(profile, options = {}) {
   const locale = profile.language || fp.languages || 'en-US';
   const port = await getFreePort();
   const userDataDir = profileDir(profile.id);
-  const proxy = await resolveChromeProxy(profile);
+  // 带账密代理：本地 SOCKS 桥必须在环境子进程内启动（父进程桥子进程连不上会 ERR_SOCKS_CONNECTION_FAILED）
+  let proxy = { proxyArg: null, release: () => {}, localPort: 0 };
+  let proxyMeta = null;
+  if (needsAuthBridge(profile)) {
+    proxyMeta = {
+      proxy_type: profile.proxy_type,
+      proxy_host: profile.proxy_host,
+      proxy_port: profile.proxy_port,
+      proxy_user: profile.proxy_user,
+      proxy_pass: profile.proxy_pass,
+    };
+  } else {
+    proxy = await resolveChromeProxy(profile);
+  }
 
   const logFile = envLogFile(profile.id);
   const softwareRender = Boolean(wantSoftwareRender());
@@ -117,6 +130,7 @@ async function launchProfileElectron(profile, options = {}) {
     startUrl,
     title: `${displayName} - 第一页自研浏览器`,
     proxyServer: proxy.proxyArg ? String(proxy.proxyArg).replace(/^--proxy-server=/, '') : '',
+    proxyMeta,
     timezone: profile.timezone || 'America/New_York',
     locale,
     latitude: Number(profile.latitude || fp.latitude || 0),
@@ -142,7 +156,7 @@ async function launchProfileElectron(profile, options = {}) {
     `--user-agent=${userAgent}`,
   ];
   if (!packaged) args.unshift(APP_ROOT);
-  if (proxy.proxyArg) args.push(proxy.proxyArg);
+  if (proxy.proxyArg && !proxyMeta) args.push(proxy.proxyArg);
   if (headless) args.push('--tkswarm-headless');
 
   const portableDir = process.env.PORTABLE_EXECUTABLE_DIR || path.dirname(electronBin);
@@ -159,7 +173,7 @@ async function launchProfileElectron(profile, options = {}) {
     `port=${port} headless=${headless ? 1 : 0}`,
     `startUrl=${startUrl}`,
     `userData=${userDataDir}`,
-    `proxy=${proxy.proxyArg || '直连'}${proxy.localPort ? `（本地桥 ${proxy.localPort}）` : ''}`,
+    `proxy=${proxyMeta ? `上游 ${proxyMeta.proxy_type}://${proxyMeta.proxy_host}:${proxyMeta.proxy_port}（子进程内建桥）` : (proxy.proxyArg || '直连')}${proxy.localPort ? `（本地桥 ${proxy.localPort}）` : ''}`,
     `远程会话=${remoteSession ? 1 : 0} 软件渲染=${softwareRender ? 1 : 0}`,
   ].join('\n'));
 

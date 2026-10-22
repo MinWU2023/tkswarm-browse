@@ -62,7 +62,8 @@ function buildDiagnosticHtml(profileId, opts = {}) {
   <p class="sub">下面是诊断信息。请确认已使用最新客户端（v1.0.13+）。</p>
   <table>${rows}</table>
   <ol class="tips">
-    <li>检查账号代理是否可用，或换直连测试。</li>
+    <li>若错误含 <code>ERR_SOCKS_CONNECTION_FAILED</code>：在 Node 账号页检查代理地址/端口/账密，或先用「测试环境窗」验证直连是否正常。</li>
+    <li>检查账号代理是否可用，或临时改为直连测试。</li>
     <li>完全退出客户端后重开（托盘也要退出）。</li>
     <li>把 <code>data/logs/env-${escHtml(profileId)}.log</code> 发给技术支持。</li>
   </ol>
@@ -162,10 +163,16 @@ async function looksLikeBlankWhite(browserWindow) {
 async function loadStatusPageOnWebContents(webContents, profileId, html) {
   if (!webContents || webContents.isDestroyed()) return;
   try {
+    webContents.stop();
+    await new Promise((r) => setTimeout(r, 80));
+  } catch { /* */ }
+  try {
     await webContents.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
     return;
   } catch (error) {
-    appendEnvLog(profileId, `状态页 data: 失败: ${error?.message || error}`);
+    const msg = String(error?.message || error);
+    if (msg.includes('ERR_ABORTED') || msg.includes('(-3)')) return;
+    appendEnvLog(profileId, `状态页 data: 失败: ${msg}`);
   }
   try {
     const file = writeStatusHtml(profileId, html);
