@@ -5,6 +5,7 @@ const { mergeFingerprint } = require('../browser/fingerprint');
 const { getCurrentUser } = require('../db');
 const { isAuthorizedRequest } = require('../settings');
 const { resolveEngine } = require('../browser/engine');
+const { DATA_ROOT } = require('../config');
 const { probeExitIp } = require('../browser/exit-ip');
 const { lookupGeoByIp, applyIpCreateFields } = require('../browser/geo-from-ip');
 const { clearProfileCache, removeProfileDir } = require('../browser/profile-cleanup');
@@ -31,14 +32,18 @@ function authMiddleware(req, res, next) {
   next();
 }
 
-/** 非超管只能操作自己的环境 */
-function assertProfileOwner(user, profile) {
+/**
+ * 环境权限：本机环境共用（任意登录用户可打开/查看）；写操作仍限创建者或超管。
+ * 创建额度 300/用户 在 db.createProfile 单独校验，与打开权限无关。
+ */
+function assertProfileOwner(user, profile, opts = {}) {
+  const write = !!opts.write;
   if (!profile) return { ok: false, msg: 'browser环境不存在或已删除' };
   if (Number(user.is_super) === 1) return { ok: true };
-  if (Number(profile.owner_id) !== Number(user.id)) {
-    return { ok: false, msg: '无权操作该浏览器环境' };
-  }
-  return { ok: true };
+  if (!write) return { ok: true };
+  const owner = Number(profile.owner_id || 0);
+  if (owner === 0 || owner === Number(user.id)) return { ok: true };
+  return { ok: false, msg: '无权修改该浏览器环境（仅创建者可删除或改配置）' };
 }
 
 function toBitProfile(row, runtime = null) {
@@ -102,6 +107,7 @@ function createRouter() {
       loggedIn: !!user,
       engine: resolveEngine(),
       version: '1.0.0',
+      dataRoot: DATA_ROOT,
     }));
   });
 
@@ -164,9 +170,8 @@ function createRouter() {
     const pageSize = Number(req.body?.pageSize || 100);
     const name = String(req.body?.name || '');
     const groupId = req.body?.groupId != null ? String(req.body.groupId) : null;
-    const user = req.currentUser;
-    const ownerFilter = Number(user.is_super) === 1 ? null : Number(user.id);
-    const pack = db.listProfiles({ page, pageSize, name, ownerId: ownerFilter, groupId });
+    // 本机环境共用：列表展示全部本地环境；创建额度仍按用户 owner_id 计数
+    const pack = db.listProfiles({ page, pageSize, name, ownerId: null, groupId });
     const windows = manager.listWindows();
     const winMap = new Map(windows.map((w) => [w.profileId, w]));
     const list = pack.list.map((row) => toBitProfile(row, winMap.get(row.id)));
@@ -219,7 +224,7 @@ function createRouter() {
     try {
       const id = String(req.body?.id || '');
       const row = db.getProfile(id);
-      const gate = assertProfileOwner(req.currentUser, row);
+      const gate = assertProfileOwner(req.currentUser, row, { write: true });
       if (!gate.ok) return res.json(fail(gate.msg));
       await manager.closeProfile(id).catch(() => {});
       db.deleteProfile(id);
@@ -235,7 +240,7 @@ function createRouter() {
     try {
       const id = String(req.body?.id || '');
       const row = db.getProfile(id);
-      const gate = assertProfileOwner(req.currentUser, row);
+      const gate = assertProfileOwner(req.currentUser, row, { write: true });
       if (!gate.ok) return res.json(fail(gate.msg));
       if (manager.getSession(id)) {
         await manager.closeProfile(id);
@@ -315,7 +320,7 @@ function createRouter() {
       // 带 id：比特兼容 upsert（更新已有环境）
       if (existingId) {
         const existing = db.getProfile(existingId);
-        const gate = assertProfileOwner(user, existing);
+        const gate = assertProfileOwner(user, existing, { write: true });
         if (!gate.ok) return res.json(fail(gate.msg));
         const row = db.updateProfileMeta(existingId, {
           name: body.name != null ? body.name : existing.name,
@@ -363,7 +368,7 @@ function createRouter() {
     try {
       const id = String(req.body?.id || '');
       const row = db.getProfile(id);
-      const gate = assertProfileOwner(req.currentUser, row);
+      const gate = assertProfileOwner(req.currentUser, row, { write: true });
       if (!gate.ok) return res.json(fail(gate.msg));
       const updated = db.updateProfileMeta(id, {
         name: req.body?.name,

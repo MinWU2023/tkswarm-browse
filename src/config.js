@@ -1,26 +1,37 @@
 const path = require('node:path');
 const os = require('node:os');
 const fs = require('node:fs');
+const { migrateIntoDataRoot } = require('./migrate-data-root');
 
 const isDev = process.argv.includes('--dev') || process.env.TKSWARM_BROWSER_DEV === '1';
 
-function appDataRoot() {
+function resolveDataRootTarget() {
   if (process.env.TKSWARM_BROWSER_DATA) {
     return path.resolve(process.env.TKSWARM_BROWSER_DATA);
   }
   // electron-builder portable：数据目录在 exe 同级的 data/
   const portableDir = process.env.PORTABLE_EXECUTABLE_DIR;
   if (portableDir) {
-    const dir = path.join(path.resolve(portableDir), 'data');
-    fs.mkdirSync(dir, { recursive: true });
-    return dir;
+    return path.join(path.resolve(portableDir), 'data');
   }
   const base = process.env.APPDATA
     || (process.platform === 'darwin'
       ? path.join(os.homedir(), 'Library', 'Application Support')
       : path.join(os.homedir(), '.local', 'share'));
-  const dir = path.join(base, 'TkSwarmBrowser');
+  return path.join(base, 'TkSwarmBrowser');
+}
+
+function appDataRoot() {
+  const dir = resolveDataRootTarget();
   fs.mkdirSync(dir, { recursive: true });
+  try {
+    const mig = migrateIntoDataRoot(dir);
+    if (mig.migrated) {
+      console.log(`[tkswarm-browses] 已从旧数据目录迁移环境: ${mig.from} → ${dir} (${mig.files || 0} 项)`);
+    }
+  } catch (e) {
+    console.warn('[tkswarm-browses] 数据目录迁移跳过:', e.message || e);
+  }
   return dir;
 }
 
