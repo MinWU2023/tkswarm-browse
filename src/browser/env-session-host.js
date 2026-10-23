@@ -87,6 +87,11 @@ async function launchProfileInProcess(profile, options = {}) {
   const startUrl = String(profile.platform || 'https://www.tiktok.com');
   const userDataDir = profileDir(id);
   const proxy = await resolveChromeProxy(profile);
+  if (profile.proxy_type && profile.proxy_type !== 'noproxy' && profile.proxy_host) {
+    if (!String(profile.proxy_user || '').trim() || !String(profile.proxy_pass || '').trim()) {
+      appendEnvLog(id, `警告：环境 ${id} 代理 ${profile.proxy_host}:${profile.proxy_port} 账密不完整，SOCKS 认证将失败`);
+    }
+  }
 
   appendEnvLog(id, `=== 同进程打开环境 ${id}（${displayName}） startUrl=${startUrl} ===`);
 

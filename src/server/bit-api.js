@@ -320,9 +320,13 @@ function createRouter() {
         proxy_type: hasProxy ? body.proxyType : 'noproxy',
         proxy_host: hasProxy ? String(body.host) : '',
         proxy_port: hasProxy ? Number(body.port) : 0,
-        proxy_user: hasProxy ? String(body.proxyUserName || '') : '',
-        proxy_pass: hasProxy ? String(body.proxyPassword || '') : '',
       };
+      if (hasProxy && body.proxyUserName != null) {
+        proxyFields.proxy_user = String(body.proxyUserName || '');
+      }
+      if (hasProxy && body.proxyPassword != null) {
+        proxyFields.proxy_pass = String(body.proxyPassword || '');
+      }
       const { lastIp, fields } = await resolveGeoFromProxy(proxyFields, fp, body);
 
       // 带 id：比特兼容 upsert（更新已有环境）

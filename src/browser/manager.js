@@ -78,6 +78,17 @@ function enqueueOpen(fn) {
   });
 }
 
+function profileProxyKey(profile) {
+  if (!profile) return '';
+  return [
+    profile.proxy_type || '',
+    profile.proxy_host || '',
+    profile.proxy_port || 0,
+    profile.proxy_user || '',
+    profile.proxy_pass ? '1' : '0',
+  ].join('|');
+}
+
 async function openProfile(profileId, options = {}) {
   const id = String(profileId);
   dropStaleSession(id);
@@ -86,7 +97,15 @@ async function openProfile(profileId, options = {}) {
   if (forceRelaunch && existing) {
     await closeProfile(id).catch(() => {});
   } else if (existing?.ws && isSessionAlive(existing)) {
-    return formatOpenResult(id, existing);
+    const fresh = db.getProfile(id);
+    const proxyChanged = fresh && profileProxyKey(fresh) !== profileProxyKey(existing.profile);
+    const metaNewer = fresh?.updated_at && existing.startedAt
+      && String(fresh.updated_at) > String(existing.startedAt);
+    if (proxyChanged || metaNewer) {
+      await closeProfile(id).catch(() => {});
+    } else {
+      return formatOpenResult(id, existing);
+    }
   }
   if (existing) dropStaleSession(id);
 
@@ -103,8 +122,14 @@ async function openProfile(profileId, options = {}) {
       throw new Error(`同时打开窗口已达上限 ${maxConc}，请先关闭部分环境后再试（可用 TKSWARM_BROWSER_MAX_CONCURRENT 调整）`);
     }
 
-    const profile = db.getProfile(id);
+    let profile = db.getProfile(id);
     if (!profile) throw new Error('browser环境不存在或已删除');
+    try {
+      const { enrichProfileProxyFromApi } = require('./proxy-enrich');
+      profile = await enrichProfileProxyFromApi(profile);
+    } catch (error) {
+      console.warn(`[manager] 代理 API 补全跳过: ${error?.message || error}`);
+    }
 
     const engine = resolveEngine();
     let launched;

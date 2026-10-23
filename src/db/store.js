@@ -80,6 +80,7 @@ function createProfile(row) {
       proxy_port: Number(row.proxy_port || 0),
       proxy_user: row.proxy_user || '',
       proxy_pass: row.proxy_pass || '',
+      proxy_id: Number(row.proxy_id || 0) || 0,
       fingerprint_json: typeof row.fingerprint_json === 'string'
         ? row.fingerprint_json
         : JSON.stringify(row.fingerprint_json || {}),
@@ -142,6 +143,7 @@ function updateProfileProxy(id, proxy) {
     // Node 偶发只同步 host/port、不带账密时，勿把库里已有密码清空（否则桥接变直连 → ERR_SOCKS）
     p.proxy_user = nextUser || (sameEndpoint ? (p.proxy_user || '') : '');
     p.proxy_pass = nextPass || (sameEndpoint ? (p.proxy_pass || '') : '');
+    if (proxy.proxyId != null) p.proxy_id = Number(proxy.proxyId) || 0;
     if (proxy.lastIp != null) p.last_ip = String(proxy.lastIp || '');
     if (proxy.timezone) p.timezone = String(proxy.timezone);
     if (proxy.language) p.language = String(proxy.language);
@@ -185,10 +187,19 @@ function updateProfileMeta(id, meta = {}) {
     }
     if (meta.platform != null) p.platform = String(meta.platform || p.platform);
     if (meta.proxy_type != null) p.proxy_type = String(meta.proxy_type);
-    if (meta.proxy_host != null) p.proxy_host = String(meta.proxy_host || '');
-    if (meta.proxy_port != null) p.proxy_port = Number(meta.proxy_port) || 0;
-    if (meta.proxy_user != null) p.proxy_user = String(meta.proxy_user || '');
-    if (meta.proxy_pass != null) p.proxy_pass = String(meta.proxy_pass || '');
+    const nextHost = meta.proxy_host != null ? String(meta.proxy_host || '') : (p.proxy_host || '');
+    const nextPort = meta.proxy_port != null ? Number(meta.proxy_port) || 0 : Number(p.proxy_port || 0);
+    const sameEndpoint = nextHost === (p.proxy_host || '') && nextPort === Number(p.proxy_port || 0);
+    if (meta.proxy_host != null) p.proxy_host = nextHost;
+    if (meta.proxy_port != null) p.proxy_port = nextPort;
+    if (meta.proxy_user != null) {
+      const nextUser = String(meta.proxy_user || '').trim();
+      p.proxy_user = nextUser || (sameEndpoint ? (p.proxy_user || '') : '');
+    }
+    if (meta.proxy_pass != null) {
+      const nextPass = String(meta.proxy_pass || '');
+      p.proxy_pass = nextPass || (sameEndpoint ? (p.proxy_pass || '') : '');
+    }
     p.updated_at = new Date().toISOString();
     return { ...p };
   });
