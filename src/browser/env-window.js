@@ -16,7 +16,7 @@
  */
 const { app, session } = require('electron');
 const { createEnvChrome } = require('./env-chrome');
-const { resolveChromeProxy } = require('./proxy-auth');
+const { resolveChromeProxy, PROXY_BRIDGE_REV } = require('./proxy-auth');
 const { showDiagnosticOnWebContents, inspectBlankContentOnWc } = require('./env-window-ui');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -265,7 +265,7 @@ function bindContentWatchers(webContents, proxyDisplay) {
 
 /* ---------------- 启动 ---------------- */
 app.whenReady().then(async () => {
-  logLine(`启动环境窗口 v${app.getVersion()} profile=${profileId} headless=${cfg.headless ? 1 : 0} target=${targetUrl}`);
+  logLine(`启动环境窗口 v${app.getVersion()} profile=${profileId} headless=${cfg.headless ? 1 : 0} target=${targetUrl} PROXY_BRIDGE_REV=${PROXY_BRIDGE_REV}`);
 
   const ses = session.defaultSession;
   if (cfg.userAgent) {

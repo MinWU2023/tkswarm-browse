@@ -18,7 +18,8 @@
     "smoke": "node scripts/smoke-test.js",
     "smoke:lifecycle": "node scripts/smoke-lifecycle.js",
     "smoke:upsert": "node scripts/smoke-upsert.js",
-    "smoke:all": "node scripts/smoke-test.js && node scripts/smoke-lifecycle.js && node scripts/smoke-upsert.js"
+    "smoke:all": "node scripts/smoke-test.js && node scripts/smoke-lifecycle.js && node scripts/smoke-upsert.js",
+    "verify:packaged": "node scripts/verify-packaged-proxy.js"
   },
   "dependencies": {
     "express": "^4.22.3",

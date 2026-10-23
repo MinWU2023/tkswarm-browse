@@ -1,8 +1,12 @@
 /**
  * 本地代理桥：Chrome/Electron 对带账密 SOCKS5 支持差，且 session.setProxy 直连上游 SOCKS 不稳定。
  * 在 127.0.0.1 起无认证本地 SOCKS5，再转发到上游（支持 IPv4 / 域名 / IPv6）。
+ * 打包后可在 env-*.log 搜 PROXY_BRIDGE_REV 确认是否为新桥代码。
  */
 const net = require('node:net');
+
+/** 代理桥实现版本（发版后对照 env 日志，避免误用旧 dist/ 或未下载的新 Release） */
+const PROXY_BRIDGE_REV = '3';
 
 /** @type {Map<string, { server: net.Server, port: number, refs: number }>} */
 const bridges = new Map();
@@ -462,4 +466,5 @@ module.exports = {
   releaseBridge,
   bridges,
   formatProxyRules,
+  PROXY_BRIDGE_REV,
 };
