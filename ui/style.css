@@ -27,6 +27,8 @@
 html, body {
   margin: 0;
   min-height: 100%;
+  width: 100%;
+  min-width: 1080px;
 }
 
 body {
@@ -81,6 +83,7 @@ body {
 .app-shell {
   position: relative;
   z-index: 1;
+  width: 100%;
   min-height: 100vh;
   display: flex;
   flex-direction: column;
@@ -114,7 +117,9 @@ code {
   justify-content: space-between;
   align-items: center;
   gap: 16px;
-  padding: 14px 28px;
+  width: 100%;
+  padding: 14px clamp(20px, 2.5vw, 32px);
+  box-sizing: border-box;
   background: rgba(255, 255, 255, 0.78);
   border-bottom: 1px solid rgba(226, 232, 240, 0.9);
   backdrop-filter: blur(16px);
@@ -246,18 +251,20 @@ code {
 /* —— Login —— */
 .login-stage {
   flex: 1;
+  width: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 32px 24px 56px;
+  padding: 32px 28px 56px;
+  box-sizing: border-box;
 }
 
 .login-layout {
   display: grid;
-  grid-template-columns: 1fr 400px;
-  gap: 40px;
-  max-width: 1080px;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 400px);
+  gap: clamp(24px, 4vw, 48px);
   width: 100%;
+  max-width: none;
   align-items: center;
 }
 
@@ -476,13 +483,16 @@ code {
 /* —— Dashboard —— */
 .dashboard {
   flex: 1;
+  width: 100%;
   animation: fadeIn 0.4s ease-out;
 }
 
 .dash-inner {
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 20px 24px 48px;
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 20px clamp(20px, 2.5vw, 32px) 48px;
+  box-sizing: border-box;
 }
 
 .welcome-banner {
@@ -546,7 +556,7 @@ code {
 /* —— Stats —— */
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 14px;
   margin-bottom: 18px;
 }
@@ -762,7 +772,7 @@ code {
 /* —— Quick grid —— */
 .quick-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
   margin-bottom: 18px;
 }
@@ -1007,22 +1017,14 @@ code {
 .anim-enter { animation: enterUp 0.55s ease-out; }
 .anim-fade { animation: fadeIn 0.45s ease-out both; }
 
-/* —— Responsive —— */
-@media (max-width: 1024px) {
-  .stats-grid { grid-template-columns: repeat(2, 1fr); }
-  .quick-grid { grid-template-columns: repeat(2, 1fr); }
-  .dash-row { grid-template-columns: 1fr; }
-  .showcase-strip { grid-template-columns: 1fr; }
-  .showcase-cards { grid-template-columns: 1fr; }
-  .login-layout { grid-template-columns: 1fr; max-width: 440px; }
-  .login-hero { display: none; }
+/* —— Responsive（窗口最小 1080px，在 1080~全屏间自适应）—— */
+@media (max-width: 1320px) {
+  .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .quick-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .showcase-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
-@media (max-width: 640px) {
-  .topbar { padding: 12px 16px; }
-  .dash-inner { padding: 16px; }
-  .welcome-banner { padding: 20px; }
-  .stats-grid,
-  .quick-grid { grid-template-columns: 1fr; }
-  .sub { max-width: 38vw; }
+@media (max-width: 1180px) {
+  .dash-row { grid-template-columns: 1fr; }
+  .showcase-strip { grid-template-columns: 1fr; }
 }

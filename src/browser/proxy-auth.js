@@ -26,6 +26,23 @@ const SYS_PROXY_MISS_TTL_MS = 5000;
 let sysProxyCache = { at: 0, value: null };
 let sysProxyInflight = null;
 
+/** 由 startLocalSocksBridge 注入，把「退回直连」这类关键事件写进 env 日志 */
+let bridgeLogger = null;
+function logBridge(message) {
+  try {
+    if (bridgeLogger) bridgeLogger(message);
+  } catch { /* */ }
+}
+
+/** 防御：万一系统代理指到了我们自己的桥，不能自己连自己 */
+function isOwnBridgePort(port) {
+  const target = Number(port);
+  for (const bridge of bridges.values()) {
+    if (Number(bridge.port) === target) return true;
+  }
+  return false;
+}
+
 function systemProxyDisabled() {
   return String(process.env.TKSWARM_NO_SYSTEM_PROXY || '').trim() === '1';
 }
@@ -264,10 +281,10 @@ async function openRawUpstream(host, port, timeoutMs = 15000) {
 
   if (!isLocal) {
     const sysProxy = await detectSystemProxy();
-    const isSameEndpoint = sysProxy
-      && sysProxy.host === targetHost
-      && Number(sysProxy.port) === targetPort;
-    if (sysProxy && !isSameEndpoint) {
+    const usable = sysProxy
+      && !isOwnBridgePort(sysProxy.port)
+      && !(sysProxy.host === targetHost && Number(sysProxy.port) === targetPort);
+    if (usable) {
       try {
         if (sysProxy.type === 'socks5') {
           return await viaSocksProxy(sysProxy, targetHost, targetPort, timeoutMs);
@@ -276,6 +293,7 @@ async function openRawUpstream(host, port, timeoutMs = 15000) {
       } catch (error) {
         // 前置代理没开/端口变了：退回直连，别让它变成新的故障点
         if (!isImmediateFailure(error)) throw error;
+        logBridge(`前置代理 ${sysProxy.type}://${sysProxy.host}:${sysProxy.port} 不可用（${error?.message || error}），已退回直连`);
       }
     }
   }
@@ -801,6 +819,7 @@ function handleSocksClient(client, profile, onError, onLog) {
 }
 
 function startLocalSocksBridge(profile, onError, onLog) {
+  if (typeof onLog === 'function') bridgeLogger = onLog;
   const key = bridgeKey(profile);
   const existing = bridges.get(key);
   if (existing) {

@@ -98,9 +98,9 @@ if (IS_ENV_PROCESS) {
   function createWindow() {
     const appIcon = loadAppIcon();
     mainWindow = new BrowserWindow({
-      width: 1180,
-      height: 760,
-      minWidth: 960,
+      width: 1280,
+      height: 800,
+      minWidth: 1080,
       minHeight: 600,
       title: '第一页自研浏览器',
       icon: appIcon || undefined,
