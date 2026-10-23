@@ -276,10 +276,10 @@ app.whenReady().then(async () => {
   let proxyRules = String(cfg.proxyServer || '').trim();
   if (cfg.proxyMeta && cfg.proxyMeta.proxy_host) {
     try {
-      const local = await resolveChromeProxy(cfg.proxyMeta);
+      const local = await resolveChromeProxy(cfg.proxyMeta, { alwaysBridge: true });
       releaseProxy = local.release || (() => {});
-      if (local.proxyArg) {
-        proxyRules = String(local.proxyArg).replace(/^--proxy-server=/, '');
+      proxyRules = local.proxyRules || String(local.proxyArg || '').replace(/^--proxy-server=/, '');
+      if (proxyRules) {
         logLine(`子进程代理桥已启动: ${proxyRules} → 上游 ${cfg.proxyMeta.proxy_type}://${cfg.proxyMeta.proxy_host}:${cfg.proxyMeta.proxy_port}`);
       }
     } catch (error) {
@@ -291,7 +291,7 @@ app.whenReady().then(async () => {
       await ses.setProxy({
         proxyMode: 'fixed_servers',
         proxyRules,
-        proxyBypassRules: '<-loopback>',
+        proxyBypassRules: '',
       });
       logLine(`代理已设置: ${proxyRules}`);
     } catch (error) {

@@ -6,7 +6,6 @@ const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { mergeFingerprint, parseResolution, buildUserAgent } = require('./fingerprint');
-const { resolveChromeProxy, needsAuthBridge } = require('./proxy-auth');
 const { reclaimBeforeOpen, writePid, clearPid } = require('./process-guard');
 const { DATA_ROOT } = require('../config');
 const { wantSoftwareRender, isRemoteSession } = require('./render-flags');
@@ -89,10 +88,9 @@ async function launchProfileElectron(profile, options = {}) {
   const locale = profile.language || fp.languages || 'en-US';
   const port = await getFreePort();
   const userDataDir = profileDir(profile.id);
-  // 带账密代理：本地 SOCKS 桥必须在环境子进程内启动（父进程桥子进程连不上会 ERR_SOCKS_CONNECTION_FAILED）
-  let proxy = { proxyArg: null, release: () => {}, localPort: 0 };
+  // 代理桥必须在环境子进程内启动（父进程桥子进程连不上；Electron setProxy 直连上游 SOCKS 也不稳定）
   let proxyMeta = null;
-  if (needsAuthBridge(profile)) {
+  if (profile.proxy_type && profile.proxy_type !== 'noproxy' && profile.proxy_host) {
     proxyMeta = {
       proxy_type: profile.proxy_type,
       proxy_host: profile.proxy_host,
@@ -100,8 +98,6 @@ async function launchProfileElectron(profile, options = {}) {
       proxy_user: profile.proxy_user,
       proxy_pass: profile.proxy_pass,
     };
-  } else {
-    proxy = await resolveChromeProxy(profile);
   }
 
   const logFile = envLogFile(profile.id);
@@ -129,7 +125,7 @@ async function launchProfileElectron(profile, options = {}) {
     acceptLanguages: locale,
     startUrl,
     title: `${displayName} - 第一页自研浏览器`,
-    proxyServer: proxy.proxyArg ? String(proxy.proxyArg).replace(/^--proxy-server=/, '') : '',
+    proxyServer: '',
     proxyMeta,
     timezone: profile.timezone || 'America/New_York',
     locale,
@@ -173,7 +169,7 @@ async function launchProfileElectron(profile, options = {}) {
     `port=${port} headless=${headless ? 1 : 0}`,
     `startUrl=${startUrl}`,
     `userData=${userDataDir}`,
-    `proxy=${proxyMeta ? `上游 ${proxyMeta.proxy_type}://${proxyMeta.proxy_host}:${proxyMeta.proxy_port}（子进程内建桥）` : (proxy.proxyArg || '直连')}${proxy.localPort ? `（本地桥 ${proxy.localPort}）` : ''}`,
+    `proxy=${proxyMeta ? `上游 ${proxyMeta.proxy_type}://${proxyMeta.proxy_host}:${proxyMeta.proxy_port}（子进程内建桥）` : '直连'}`,
     `远程会话=${remoteSession ? 1 : 0} 软件渲染=${softwareRender ? 1 : 0}`,
   ].join('\n'));
 
@@ -197,7 +193,6 @@ async function launchProfileElectron(profile, options = {}) {
   try {
     ver = await waitForDevtools(port);
   } catch (error) {
-    proxy.release?.();
     clearPid(profile.id);
     try { child.kill(); } catch { /* */ }
     const tail = readLogTail(logFile);
@@ -218,7 +213,6 @@ async function launchProfileElectron(profile, options = {}) {
         .filter((t) => t.type === 'page')
         .map((t) => String(t.url || ''));
     } catch { /* */ }
-    proxy.release?.();
     clearPid(profile.id);
     try { child.kill(); } catch { /* */ }
     const tail = readLogTail(logFile);
@@ -250,8 +244,8 @@ async function launchProfileElectron(profile, options = {}) {
     fp,
     engine: 'electron',
     inProcess: false,
-    releaseProxy: proxy.release || (() => {}),
-    localProxyPort: proxy.localPort || 0,
+    releaseProxy: () => {},
+    localProxyPort: 0,
   };
 }
 

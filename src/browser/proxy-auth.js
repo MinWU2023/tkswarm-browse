@@ -1,9 +1,8 @@
 /**
- * 本地代理桥：Chrome 不支持带账密的 SOCKS5/HTTP 代理直连。
- * 本模块在 127.0.0.1 起一个无认证本地端口，再转发到上游并带上认证。
+ * 本地代理桥：Chrome/Electron 对带账密 SOCKS5 支持差，且 session.setProxy 直连上游 SOCKS 不稳定。
+ * 在 127.0.0.1 起无认证本地 SOCKS5，再转发到上游（支持 IPv4 / 域名 / IPv6）。
  */
 const net = require('node:net');
-const { EventEmitter } = require('node:events');
 
 /** @type {Map<string, { server: net.Server, port: number, refs: number }>} */
 const bridges = new Map();
@@ -36,11 +35,100 @@ function packSocksAuth(user, pass) {
   ]);
 }
 
-function connectUpstreamSocks5(host, port, user, pass, destHost, destPort) {
+function ipv6BufToString(buf) {
+  const parts = [];
+  for (let i = 0; i < 16; i += 2) {
+    parts.push(buf.readUInt16BE(i).toString(16));
+  }
+  let s = parts.join(':');
+  s = s.replace(/(^|:)0(:0)+:0(?=:|$)/, '$1::');
+  s = s.replace(/(^|:)0:0(?=:|$)/, '$1::');
+  return s;
+}
+
+/** @param {{ host: string, port: number, atyp?: number, ipBuf?: Buffer }} dest */
+function buildSocks5ConnectBuf(dest) {
+  const port = Number(dest.port) || 0;
+  const host = String(dest.host || '').trim();
+  const atyp = dest.atyp;
+  const ipBuf = dest.ipBuf;
+
+  if (atyp === 0x04 && ipBuf && ipBuf.length === 16) {
+    const req = Buffer.alloc(22);
+    req[0] = 0x05;
+    req[1] = 0x01;
+    req[2] = 0x00;
+    req[3] = 0x04;
+    ipBuf.copy(req, 4);
+    req.writeUInt16BE(port, 20);
+    return req;
+  }
+
+  if (net.isIPv4(host)) {
+    const oct = host.split('.').map((x) => Number(x));
+    const req = Buffer.alloc(10);
+    req[0] = 0x05;
+    req[1] = 0x01;
+    req[2] = 0x00;
+    req[3] = 0x01;
+    req[4] = oct[0];
+    req[5] = oct[1];
+    req[6] = oct[2];
+    req[7] = oct[3];
+    req.writeUInt16BE(port, 8);
+    return req;
+  }
+
+  if (net.isIPv6(host)) {
+    const normalized = host.replace(/^\[|\]$/g, '');
+    const chunks = normalized.split(':');
+    const buf = Buffer.alloc(16);
+    let bi = 0;
+    let ci = 0;
+    if (normalized.includes('::')) {
+      const [left, right] = normalized.split('::');
+      const leftParts = left ? left.split(':') : [];
+      const rightParts = right ? right.split(':') : [];
+      const missing = 8 - leftParts.length - rightParts.length;
+      const full = [...leftParts, ...Array(missing).fill('0'), ...rightParts];
+      for (const part of full) {
+        buf.writeUInt16BE(parseInt(part || '0', 16), bi);
+        bi += 2;
+      }
+    } else {
+      for (const part of chunks) {
+        buf.writeUInt16BE(parseInt(part || '0', 16), bi);
+        bi += 2;
+      }
+    }
+    const req = Buffer.alloc(22);
+    req[0] = 0x05;
+    req[1] = 0x01;
+    req[2] = 0x00;
+    req[3] = 0x04;
+    buf.copy(req, 4);
+    req.writeUInt16BE(port, 20);
+    return req;
+  }
+
+  const hostBuf = Buffer.from(host, 'utf8');
+  const req = Buffer.alloc(7 + hostBuf.length);
+  req[0] = 0x05;
+  req[1] = 0x01;
+  req[2] = 0x00;
+  req[3] = 0x03;
+  req[4] = hostBuf.length;
+  hostBuf.copy(req, 5);
+  req.writeUInt16BE(port, 5 + hostBuf.length);
+  return req;
+}
+
+function connectUpstreamSocks5(host, port, user, pass, dest) {
   return new Promise((resolve, reject) => {
     const sock = net.connect(Number(port), host);
     let stage = 'greeting';
     let buf = Buffer.alloc(0);
+    const hasAuth = Boolean(String(user || '').trim() || String(pass || '').trim());
 
     const fail = (err) => {
       try { sock.destroy(); } catch { /* */ }
@@ -62,7 +150,7 @@ function connectUpstreamSocks5(host, port, user, pass, destHost, destPort) {
         }
         if (method === 0x00) {
           stage = 'request';
-          sendConnect();
+          sock.write(buildSocks5ConnectBuf(dest));
           return;
         }
         return fail(new Error(`SOCKS5 不支持的认证方法: ${method}`));
@@ -72,13 +160,12 @@ function connectUpstreamSocks5(host, port, user, pass, destHost, destPort) {
         if (buf[1] !== 0x00) return fail(new Error('SOCKS5 用户名/密码认证失败'));
         buf = buf.slice(2);
         stage = 'request';
-        sendConnect();
+        sock.write(buildSocks5ConnectBuf(dest));
         return;
       }
       if (stage === 'request') {
         if (buf.length < 4) return;
         if (buf[1] !== 0x00) return fail(new Error(`SOCKS5 连接失败 code=${buf[1]}`));
-        // 跳过回复头
         let need = 4;
         const atyp = buf[3];
         if (atyp === 0x01) need += 4 + 2;
@@ -92,36 +179,24 @@ function connectUpstreamSocks5(host, port, user, pass, destHost, destPort) {
       }
     });
 
-    function sendConnect() {
-      const hostBuf = Buffer.from(destHost, 'utf8');
-      const req = Buffer.alloc(7 + hostBuf.length);
-      req[0] = 0x05;
-      req[1] = 0x01;
-      req[2] = 0x00;
-      req[3] = 0x03;
-      req[4] = hostBuf.length;
-      hostBuf.copy(req, 5);
-      req.writeUInt16BE(Number(destPort), 5 + hostBuf.length);
-      sock.write(req);
-    }
-
-    // greeting: 支持 no-auth + user/pass
-    sock.write(Buffer.from([0x05, 0x02, 0x00, 0x02]));
+    sock.write(hasAuth ? Buffer.from([0x05, 0x01, 0x02]) : Buffer.from([0x05, 0x01, 0x00]));
   });
 }
 
 function connectUpstreamHttp(host, port, user, pass, destHost, destPort) {
   return new Promise((resolve, reject) => {
     const sock = net.connect(Number(port), host);
-    const auth = Buffer.from(`${user}:${pass}`, 'utf8').toString('base64');
-    const req = [
+    const hasAuth = Boolean(String(user || '').trim() || String(pass || '').trim());
+    const lines = [
       `CONNECT ${destHost}:${destPort} HTTP/1.1`,
       `Host: ${destHost}:${destPort}`,
-      `Proxy-Authorization: Basic ${auth}`,
-      'Proxy-Connection: Keep-Alive',
-      '',
-      '',
-    ].join('\r\n');
+    ];
+    if (hasAuth) {
+      const auth = Buffer.from(`${user}:${pass}`, 'utf8').toString('base64');
+      lines.push(`Proxy-Authorization: Basic ${auth}`);
+    }
+    lines.push('Proxy-Connection: Keep-Alive', '', '');
+    const req = lines.join('\r\n');
 
     let buf = '';
     sock.on('error', reject);
@@ -140,6 +215,42 @@ function connectUpstreamHttp(host, port, user, pass, destHost, destPort) {
     });
     sock.write(req);
   });
+}
+
+function parseSocksClientRequest(buf) {
+  if (buf.length < 7) return null;
+  if (buf[0] !== 0x05 || buf[1] !== 0x01) return { error: 0x07 };
+  const atyp = buf[3];
+  let offset = 4;
+  let destHost = '';
+  let destPort = 0;
+  let ipBuf = null;
+
+  if (atyp === 0x01) {
+    if (buf.length < 10) return null;
+    destHost = `${buf[4]}.${buf[5]}.${buf[6]}.${buf[7]}`;
+    destPort = buf.readUInt16BE(8);
+    offset = 10;
+  } else if (atyp === 0x03) {
+    const len = buf[4];
+    if (buf.length < 5 + len + 2) return null;
+    destHost = buf.slice(5, 5 + len).toString('utf8');
+    destPort = buf.readUInt16BE(5 + len);
+    offset = 5 + len + 2;
+  } else if (atyp === 0x04) {
+    if (buf.length < 22) return null;
+    ipBuf = buf.slice(4, 20);
+    destHost = ipv6BufToString(ipBuf);
+    destPort = buf.readUInt16BE(20);
+    offset = 22;
+  } else {
+    return { error: 0x08 };
+  }
+
+  return {
+    dest: { host: destHost, port: destPort, atyp, ipBuf },
+    leftover: buf.slice(offset),
+  };
 }
 
 function startLocalSocksBridge(profile) {
@@ -174,47 +285,28 @@ function startLocalSocksBridge(profile) {
             }
             const nMethods = buf[1];
             if (buf.length < 2 + nMethods) return;
-            // 本地桥：对 Chrome 声明无认证
             client.write(Buffer.from([0x05, 0x00]));
             buf = buf.slice(2 + nMethods);
             stage = 'request';
             if (!buf.length) return;
           }
           if (stage === 'request') {
-            if (buf.length < 7) return;
-            if (buf[0] !== 0x05 || buf[1] !== 0x01) {
-              client.end(Buffer.from([0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
+            const parsed = parseSocksClientRequest(buf);
+            if (!parsed) return;
+            if (parsed.error) {
+              client.end(Buffer.from([0x05, parsed.error, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
               return;
             }
-            const atyp = buf[3];
-            let offset = 4;
-            let destHost = '';
-            let destPort = 0;
-            if (atyp === 0x01) {
-              if (buf.length < 10) return;
-              destHost = `${buf[4]}.${buf[5]}.${buf[6]}.${buf[7]}`;
-              destPort = buf.readUInt16BE(8);
-              offset = 10;
-            } else if (atyp === 0x03) {
-              const len = buf[4];
-              if (buf.length < 5 + len + 2) return;
-              destHost = buf.slice(5, 5 + len).toString('utf8');
-              destPort = buf.readUInt16BE(5 + len);
-              offset = 5 + len + 2;
-            } else {
-              client.end(Buffer.from([0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
-              return;
-            }
-            const leftover = buf.slice(offset);
+            const { dest, leftover } = parsed;
             buf = Buffer.alloc(0);
             stage = 'tunnel';
             client.pause();
 
             let upstream;
             if (type === 'http' || type === 'https') {
-              upstream = await connectUpstreamHttp(upHost, upPort, user, pass, destHost, destPort);
+              upstream = await connectUpstreamHttp(upHost, upPort, user, pass, dest.host, dest.port);
             } else {
-              upstream = await connectUpstreamSocks5(upHost, upPort, user, pass, destHost, destPort);
+              upstream = await connectUpstreamSocks5(upHost, upPort, user, pass, dest);
             }
             client.write(Buffer.from([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
             if (leftover.length) upstream.write(leftover);
@@ -251,28 +343,38 @@ function releaseBridge(key) {
   try { entry.server.close(); } catch { /* */ }
 }
 
+function formatProxyRules(port) {
+  return `socks5=127.0.0.1:${port}`;
+}
+
 /**
- * @returns {Promise<{ proxyArg: string|null, release: function, localPort?: number }>}
+ * @returns {Promise<{ proxyArg: string|null, release: function, localPort?: number, proxyRules?: string }>}
  */
-async function resolveChromeProxy(profile) {
+async function resolveChromeProxy(profile, opts = {}) {
   const type = String(profile.proxy_type || 'noproxy').toLowerCase();
   if (type === 'noproxy' || !profile.proxy_host) {
     return { proxyArg: null, release: () => {} };
   }
 
-  if (!needsAuthBridge(profile)) {
+  const alwaysBridge = opts.alwaysBridge !== false;
+  const useBridge = alwaysBridge || needsAuthBridge(profile);
+
+  if (!useBridge) {
     const host = profile.proxy_host;
     const port = profile.proxy_port;
     if (type === 'socks5' || type === 'socks') {
-      return { proxyArg: `--proxy-server=socks5://${host}:${port}`, release: () => {} };
+      const rules = `socks5://${host}:${port}`;
+      return { proxyArg: `--proxy-server=${rules}`, proxyRules: rules, release: () => {} };
     }
-    return { proxyArg: `--proxy-server=${host}:${port}`, release: () => {} };
+    const rules = `${host}:${port}`;
+    return { proxyArg: `--proxy-server=${rules}`, proxyRules: rules, release: () => {} };
   }
 
-  // 有账密：本地 SOCKS 桥（Chrome 连本地无认证 SOCKS5）
   const bridge = await startLocalSocksBridge(profile);
+  const rules = formatProxyRules(bridge.port);
   return {
-    proxyArg: `--proxy-server=socks5://127.0.0.1:${bridge.port}`,
+    proxyArg: `--proxy-server=${rules}`,
+    proxyRules: rules,
     release: bridge.release,
     localPort: bridge.port,
   };
@@ -283,4 +385,5 @@ module.exports = {
   needsAuthBridge,
   releaseBridge,
   bridges,
+  formatProxyRules,
 };

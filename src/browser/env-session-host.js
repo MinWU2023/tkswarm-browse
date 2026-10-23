@@ -86,7 +86,7 @@ async function launchProfileInProcess(profile, options = {}) {
   const timezone = profile.timezone || 'America/New_York';
   const startUrl = String(profile.platform || 'https://www.tiktok.com');
   const userDataDir = profileDir(id);
-  const proxy = await resolveChromeProxy(profile);
+  const proxy = await resolveChromeProxy(profile, { alwaysBridge: true });
 
   appendEnvLog(id, `=== 同进程打开环境 ${id}（${displayName}） startUrl=${startUrl} ===`);
 
@@ -103,8 +103,8 @@ async function launchProfileInProcess(profile, options = {}) {
     try { ses.setUserAgent(userAgent, locale); } catch { ses.setUserAgent(userAgent); }
   }
   if (proxy.proxyArg) {
-    const rules = String(proxy.proxyArg).replace(/^--proxy-server=/, '');
-    await ses.setProxy({ proxyMode: 'fixed_servers', proxyRules: rules, proxyBypassRules: '<-loopback>' });
+    const rules = proxy.proxyRules || String(proxy.proxyArg).replace(/^--proxy-server=/, '');
+    await ses.setProxy({ proxyMode: 'fixed_servers', proxyRules: rules, proxyBypassRules: '' });
     appendEnvLog(id, `代理: ${rules}`);
   } else {
     await ses.setProxy({ proxyMode: 'direct' });
