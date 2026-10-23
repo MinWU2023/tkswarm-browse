@@ -123,25 +123,39 @@ function buildSocks5ConnectBuf(dest) {
   return req;
 }
 
+const UPSTREAM_TIMEOUT_MS = 25000;
+
 function connectUpstreamSocks5(host, port, user, pass, dest) {
   return new Promise((resolve, reject) => {
-    const sock = net.connect(Number(port), host);
+    const hasAuth = Boolean(String(user || '').trim() || String(pass || '').trim());
+    const sock = net.connect({ host, port: Number(port), timeout: UPSTREAM_TIMEOUT_MS });
     let stage = 'greeting';
     let buf = Buffer.alloc(0);
-    const hasAuth = Boolean(String(user || '').trim() || String(pass || '').trim());
+    let settled = false;
 
     const fail = (err) => {
+      if (settled) return;
+      settled = true;
       try { sock.destroy(); } catch { /* */ }
-      reject(err);
+      reject(err instanceof Error ? err : new Error(String(err)));
+    };
+
+    const succeed = (upstream) => {
+      if (settled) return;
+      settled = true;
+      sock.setTimeout(0);
+      resolve(upstream);
     };
 
     sock.on('error', fail);
+    sock.on('timeout', () => fail(new Error('上游 SOCKS 连接超时')));
     sock.on('data', (chunk) => {
       buf = Buffer.concat([buf, chunk]);
       if (stage === 'greeting') {
         if (buf.length < 2) return;
         if (buf[0] !== 0x05) return fail(new Error('上游不是 SOCKS5'));
         const method = buf[1];
+        if (method === 0xFF) return fail(new Error('SOCKS5 拒绝认证方式'));
         buf = buf.slice(2);
         if (method === 0x02) {
           stage = 'auth';
@@ -157,7 +171,9 @@ function connectUpstreamSocks5(host, port, user, pass, dest) {
       }
       if (stage === 'auth') {
         if (buf.length < 2) return;
-        if (buf[1] !== 0x00) return fail(new Error('SOCKS5 用户名/密码认证失败'));
+        if (buf[0] !== 0x01 || buf[1] !== 0x00) {
+          return fail(new Error('SOCKS5 用户名/密码认证失败'));
+        }
         buf = buf.slice(2);
         stage = 'request';
         sock.write(buildSocks5ConnectBuf(dest));
@@ -173,20 +189,28 @@ function connectUpstreamSocks5(host, port, user, pass, dest) {
           if (buf.length < 5) return;
           need += 1 + buf[4] + 2;
         } else if (atyp === 0x04) need += 16 + 2;
+        else return fail(new Error('SOCKS5 不支持地址类型'));
         if (buf.length < need) return;
         sock.removeAllListeners('data');
-        resolve(sock);
+        succeed(sock);
       }
     });
 
-    sock.write(hasAuth ? Buffer.from([0x05, 0x01, 0x02]) : Buffer.from([0x05, 0x01, 0x00]));
+    sock.on('connect', () => {
+      // 与 Node 探测一致：有账密时同时提供无认证 + 用户名密码
+      if (hasAuth) {
+        sock.write(Buffer.from([0x05, 0x02, 0x00, 0x02]));
+      } else {
+        sock.write(Buffer.from([0x05, 0x01, 0x00]));
+      }
+    });
   });
 }
 
 function connectUpstreamHttp(host, port, user, pass, destHost, destPort) {
   return new Promise((resolve, reject) => {
-    const sock = net.connect(Number(port), host);
     const hasAuth = Boolean(String(user || '').trim() || String(pass || '').trim());
+    const sock = net.connect({ host, port: Number(port), timeout: UPSTREAM_TIMEOUT_MS });
     const lines = [
       `CONNECT ${destHost}:${destPort} HTTP/1.1`,
       `Host: ${destHost}:${destPort}`,
@@ -199,21 +223,34 @@ function connectUpstreamHttp(host, port, user, pass, destHost, destPort) {
     const req = lines.join('\r\n');
 
     let buf = '';
-    sock.on('error', reject);
+    let settled = false;
+    const fail = (err) => {
+      if (settled) return;
+      settled = true;
+      try { sock.destroy(); } catch { /* */ }
+      reject(err instanceof Error ? err : new Error(String(err)));
+    };
+    const succeed = (upstream) => {
+      if (settled) return;
+      settled = true;
+      sock.setTimeout(0);
+      resolve(upstream);
+    };
+
+    sock.on('error', fail);
+    sock.on('timeout', () => fail(new Error('上游 HTTP 代理连接超时')));
     sock.on('data', (chunk) => {
       buf += chunk.toString('binary');
       const idx = buf.indexOf('\r\n\r\n');
       if (idx < 0) return;
       const head = buf.slice(0, idx);
       if (!/^HTTP\/1\.\d 200/i.test(head)) {
-        sock.destroy();
-        reject(new Error(`HTTP 代理 CONNECT 失败: ${head.split('\r\n')[0]}`));
-        return;
+        return fail(new Error(`HTTP 代理 CONNECT 失败: ${head.split('\r\n')[0]}`));
       }
       sock.removeAllListeners('data');
-      resolve(sock);
+      succeed(sock);
     });
-    sock.write(req);
+    sock.on('connect', () => sock.write(req));
   });
 }
 
@@ -253,7 +290,104 @@ function parseSocksClientRequest(buf) {
   };
 }
 
-function startLocalSocksBridge(profile) {
+function handleSocksClient(client, profile, onError) {
+  const upHost = String(profile.proxy_host);
+  const upPort = Number(profile.proxy_port);
+  const user = String(profile.proxy_user || '');
+  const pass = String(profile.proxy_pass || '');
+  const type = String(profile.proxy_type || 'socks5').toLowerCase();
+
+  let buf = Buffer.alloc(0);
+  let stage = 'greeting';
+  let upstream = null;
+  const clientPending = [];
+
+  const destroyBoth = () => {
+    try { client.destroy(); } catch { /* */ }
+    try { upstream?.destroy(); } catch { /* */ }
+  };
+
+  const replyFail = (code = 0x01) => {
+    try {
+      client.end(Buffer.from([0x05, code, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
+    } catch { /* */ }
+    destroyBoth();
+  };
+
+  const startTunnel = (up, leftover) => {
+    upstream = up;
+    client.write(Buffer.from([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
+    if (leftover.length) up.write(leftover);
+    for (const pending of clientPending) up.write(pending);
+    clientPending.length = 0;
+    stage = 'tunnel';
+    up.on('error', () => destroyBoth());
+    client.on('error', () => destroyBoth());
+    client.on('close', () => { try { up.destroy(); } catch { /* */ } });
+    up.on('close', () => { try { client.destroy(); } catch { /* */ } });
+    client.pipe(up);
+    up.pipe(client);
+  };
+
+  client.on('error', () => destroyBoth());
+  client.on('data', (chunk) => {
+    if (stage === 'tunnel') {
+      if (upstream) upstream.write(chunk);
+      else clientPending.push(chunk);
+      return;
+    }
+    if (stage === 'connecting') {
+      clientPending.push(chunk);
+      return;
+    }
+
+    buf = Buffer.concat([buf, chunk]);
+
+    if (stage === 'greeting') {
+      if (buf.length < 2) return;
+      if (buf[0] !== 0x05) {
+        client.destroy();
+        return;
+      }
+      const nMethods = buf[1];
+      if (buf.length < 2 + nMethods) return;
+      client.write(Buffer.from([0x05, 0x00]));
+      buf = buf.slice(2 + nMethods);
+      stage = 'request';
+      if (!buf.length) return;
+    }
+
+    if (stage === 'request') {
+      const parsed = parseSocksClientRequest(buf);
+      if (!parsed) return;
+      if (parsed.error) {
+        replyFail(parsed.error);
+        return;
+      }
+      const { dest, leftover } = parsed;
+      buf = Buffer.alloc(0);
+      stage = 'connecting';
+      client.pause();
+
+      const connectUp = (type === 'http' || type === 'https')
+        ? connectUpstreamHttp(upHost, upPort, user, pass, dest.host, dest.port)
+        : connectUpstreamSocks5(upHost, upPort, user, pass, dest);
+
+      void connectUp
+        .then((up) => {
+          client.resume();
+          startTunnel(up, leftover);
+        })
+        .catch((error) => {
+          if (onError) onError(error, dest);
+          client.resume();
+          replyFail(0x01);
+        });
+    }
+  });
+}
+
+function startLocalSocksBridge(profile, onError) {
   const key = bridgeKey(profile);
   const existing = bridges.get(key);
   if (existing) {
@@ -261,68 +395,9 @@ function startLocalSocksBridge(profile) {
     return Promise.resolve({ port: existing.port, key, release: () => releaseBridge(key) });
   }
 
-  const upHost = String(profile.proxy_host);
-  const upPort = Number(profile.proxy_port);
-  const user = String(profile.proxy_user || '');
-  const pass = String(profile.proxy_pass || '');
-  const type = String(profile.proxy_type || 'socks5').toLowerCase();
-
   return new Promise((resolve, reject) => {
     const server = net.createServer((client) => {
-      let buf = Buffer.alloc(0);
-      let stage = 'greeting';
-
-      client.on('error', () => client.destroy());
-      client.on('data', async (chunk) => {
-        try {
-          if (stage === 'tunnel') return;
-          buf = Buffer.concat([buf, chunk]);
-          if (stage === 'greeting') {
-            if (buf.length < 2) return;
-            if (buf[0] !== 0x05) {
-              client.destroy();
-              return;
-            }
-            const nMethods = buf[1];
-            if (buf.length < 2 + nMethods) return;
-            client.write(Buffer.from([0x05, 0x00]));
-            buf = buf.slice(2 + nMethods);
-            stage = 'request';
-            if (!buf.length) return;
-          }
-          if (stage === 'request') {
-            const parsed = parseSocksClientRequest(buf);
-            if (!parsed) return;
-            if (parsed.error) {
-              client.end(Buffer.from([0x05, parsed.error, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
-              return;
-            }
-            const { dest, leftover } = parsed;
-            buf = Buffer.alloc(0);
-            stage = 'tunnel';
-            client.pause();
-
-            let upstream;
-            if (type === 'http' || type === 'https') {
-              upstream = await connectUpstreamHttp(upHost, upPort, user, pass, dest.host, dest.port);
-            } else {
-              upstream = await connectUpstreamSocks5(upHost, upPort, user, pass, dest);
-            }
-            client.write(Buffer.from([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
-            if (leftover.length) upstream.write(leftover);
-            client.resume();
-            client.pipe(upstream);
-            upstream.pipe(client);
-            upstream.on('error', () => client.destroy());
-            client.on('close', () => upstream.destroy());
-          }
-        } catch (e) {
-          try {
-            client.end(Buffer.from([0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
-          } catch { /* */ }
-          client.destroy();
-        }
-      });
+      handleSocksClient(client, profile, onError);
     });
 
     server.on('error', reject);
@@ -344,7 +419,7 @@ function releaseBridge(key) {
 }
 
 function formatProxyRules(port) {
-  return `socks5=127.0.0.1:${port}`;
+  return `socks5://127.0.0.1:${port}`;
 }
 
 /**
@@ -370,7 +445,8 @@ async function resolveChromeProxy(profile, opts = {}) {
     return { proxyArg: `--proxy-server=${rules}`, proxyRules: rules, release: () => {} };
   }
 
-  const bridge = await startLocalSocksBridge(profile);
+  const onError = typeof opts.onError === 'function' ? opts.onError : null;
+  const bridge = await startLocalSocksBridge(profile, onError);
   const rules = formatProxyRules(bridge.port);
   return {
     proxyArg: `--proxy-server=${rules}`,

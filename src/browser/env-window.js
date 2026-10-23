@@ -276,11 +276,18 @@ app.whenReady().then(async () => {
   let proxyRules = String(cfg.proxyServer || '').trim();
   if (cfg.proxyMeta && cfg.proxyMeta.proxy_host) {
     try {
-      const local = await resolveChromeProxy(cfg.proxyMeta, { alwaysBridge: true });
+      const local = await resolveChromeProxy(cfg.proxyMeta, {
+        alwaysBridge: true,
+        onError: (error, dest) => {
+          const target = dest ? `${dest.host}:${dest.port}` : '';
+          logLine(`子进程代理桥转发失败${target ? ` → ${target}` : ''}: ${error?.message || error}`);
+        },
+      });
       releaseProxy = local.release || (() => {});
       proxyRules = local.proxyRules || String(local.proxyArg || '').replace(/^--proxy-server=/, '');
       if (proxyRules) {
-        logLine(`子进程代理桥已启动: ${proxyRules} → 上游 ${cfg.proxyMeta.proxy_type}://${cfg.proxyMeta.proxy_host}:${cfg.proxyMeta.proxy_port}`);
+        const authHint = cfg.proxyMeta.proxy_user ? '（含账密）' : '（无账密）';
+        logLine(`子进程代理桥已启动: ${proxyRules} → 上游 ${cfg.proxyMeta.proxy_type}://${cfg.proxyMeta.proxy_host}:${cfg.proxyMeta.proxy_port}${authHint}`);
       }
     } catch (error) {
       logLine(`子进程代理桥启动失败: ${error?.message || error}`);
