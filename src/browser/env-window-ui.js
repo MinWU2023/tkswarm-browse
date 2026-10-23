@@ -36,6 +36,7 @@ function buildDiagnosticHtml(profileId, opts = {}) {
     ['失败原因', opts.reason || '未知'],
     ['错误详情', opts.detail || '—'],
     ['代理设置', opts.proxy || '直连（未绑定代理）'],
+    ['代理自检', opts.probe || '检测中…（开窗后约 7 秒出结果，也可看日志）'],
     ['环境 ID', profileId],
     ['数据目录', opts.userDataDir || '—'],
     ['日志文件', envLogPath(profileId)],
@@ -62,6 +63,7 @@ function buildDiagnosticHtml(profileId, opts = {}) {
   <p class="sub">下面是诊断信息。请确认已使用最新客户端（v1.0.13+）。</p>
   <table>${rows}</table>
   <ol class="tips">
+    <li>先看上面「代理自检」：<b>TikTok 不通 + 中性站通</b> = 代理封了 TikTok 出口（换支持 TikTok 的节点）；<b>两个都不通</b> = 代理服务器本身连不上（过期 / IP 被封 / 端口错）；<b>提示认证被拒</b> = 代理账密填错。</li>
     <li>若错误含 <code>ERR_SOCKS_CONNECTION_FAILED</code>：在 Node 账号页检查代理地址/端口/账密，或先用「测试环境窗」验证直连是否正常。</li>
     <li>检查账号代理是否可用，或临时改为直连测试。</li>
     <li>完全退出客户端后重开（托盘也要退出）。</li>

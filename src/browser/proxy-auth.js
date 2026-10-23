@@ -6,10 +6,48 @@
 const net = require('node:net');
 
 /** 代理桥实现版本（发版后对照 env 日志，避免误用旧 dist/ 或未下载的新 Release） */
-const PROXY_BRIDGE_REV = '4';
+const PROXY_BRIDGE_REV = '6';
 
 /** @type {Map<string, { server: net.Server, port: number, refs: number }>} */
 const bridges = new Map();
+
+/**
+ * 同时向上游发起 **握手** 的并发上限（隧道建立后立即释放槽位）。
+ * 住宅代理对「新建连接」敏感，握手阶段排队可避免 SYN 风暴；但不能把槽位占满整条隧道，
+ * 否则 TikTok 首页几十条长连接会把槽占死，其余连接排队超时 → 大面积代理失败页。
+ */
+const MAX_UPSTREAM_CONCURRENCY = 32;
+const UPSTREAM_QUEUE_TIMEOUT_MS = 20000;
+let upstreamActive = 0;
+/** @type {Array<{ resolve: Function, timer: any }>} */
+const upstreamQueue = [];
+
+function acquireUpstreamSlot(timeoutMs = UPSTREAM_QUEUE_TIMEOUT_MS) {
+  if (upstreamActive < MAX_UPSTREAM_CONCURRENCY) {
+    upstreamActive += 1;
+    return Promise.resolve();
+  }
+  return new Promise((resolve, reject) => {
+    const waiter = { resolve, timer: null };
+    waiter.timer = setTimeout(() => {
+      const index = upstreamQueue.indexOf(waiter);
+      if (index >= 0) upstreamQueue.splice(index, 1);
+      reject(new Error('上游并发已满（排队超时）'));
+    }, timeoutMs);
+    upstreamQueue.push(waiter);
+  });
+}
+
+function releaseUpstreamSlot() {
+  const next = upstreamQueue.shift();
+  if (next) {
+    // 槽位直接转交给排队的人，占用总数不变
+    clearTimeout(next.timer);
+    next.resolve();
+    return;
+  }
+  upstreamActive = Math.max(0, upstreamActive - 1);
+}
 
 function bridgeKey(profile) {
   const type = String(profile.proxy_type || 'noproxy').toLowerCase();
@@ -127,7 +165,13 @@ function buildSocks5ConnectBuf(dest) {
   return req;
 }
 
-const UPSTREAM_TIMEOUT_MS = 25000;
+/**
+ * 单次上游连接超时。住宅/轮换代理经常出现「一次 ETIMEDOUT、下一次就通」，
+ * 所以单次别等太久（20s+ 干等没意义），改成短超时 + 多次重试。
+ */
+const UPSTREAM_TIMEOUT_MS = 9000;
+/** 上游连接重试次数（含首次） */
+const UPSTREAM_ATTEMPTS = 3;
 
 function connectUpstreamSocks5(host, port, user, pass, dest) {
   return new Promise((resolve, reject) => {
@@ -388,16 +432,36 @@ function handleSocksClient(client, profile, onError, onLog) {
       stage = 'connecting';
       client.pause();
 
-      const connectUp = (type === 'http' || type === 'https')
+      const openUpstream = () => ((type === 'http' || type === 'https')
         ? connectUpstreamHttp(upHost, upPort, user, pass, dest.host, dest.port)
-        : connectUpstreamSocks5(upHost, upPort, user, pass, dest);
+        : connectUpstreamSocks5(upHost, upPort, user, pass, dest));
 
-      void connectUp
+      // 住宅代理常见「这一次超时、下一次就通」，短超时 + 重试明显更稳
+      const attempt = (n) => openUpstream().catch((error) => {
+        log(`上游连接失败（第 ${n}/${UPSTREAM_ATTEMPTS} 次）: ${error?.message || error}`);
+        if (n >= UPSTREAM_ATTEMPTS) throw error;
+        return new Promise((done) => setTimeout(done, 300 * n)).then(() => attempt(n + 1));
+      });
+
+      let releaseSlot = () => {};
+      void acquireUpstreamSlot()
+        .then(() => {
+          let held = true;
+          releaseSlot = () => {
+            if (!held) return;
+            held = false;
+            releaseUpstreamSlot();
+          };
+          if (client.destroyed) throw new Error('客户端已断开');
+          return attempt(1);
+        })
         .then((up) => {
+          releaseSlot();
           client.resume();
           startTunnel(up, leftover, dest);
         })
         .catch((error) => {
+          releaseSlot();
           if (onError) onError(error, dest);
           client.resume();
           replyFail(0x01);
@@ -450,8 +514,7 @@ async function resolveChromeProxy(profile, opts = {}) {
     return { proxyArg: null, release: () => {} };
   }
 
-  const alwaysBridge = opts.alwaysBridge !== false;
-  const useBridge = alwaysBridge || needsAuthBridge(profile);
+  const useBridge = opts.alwaysBridge === true || needsAuthBridge(profile);
 
   if (!useBridge) {
     const host = profile.proxy_host;

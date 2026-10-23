@@ -86,7 +86,7 @@ async function launchProfileInProcess(profile, options = {}) {
   const timezone = profile.timezone || 'America/New_York';
   const startUrl = String(profile.platform || 'https://www.tiktok.com');
   const userDataDir = profileDir(id);
-  const proxy = await resolveChromeProxy(profile, { alwaysBridge: true });
+  const proxy = await resolveChromeProxy(profile);
 
   appendEnvLog(id, `=== 同进程打开环境 ${id}（${displayName}） startUrl=${startUrl} ===`);
 

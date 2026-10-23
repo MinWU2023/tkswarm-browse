@@ -13,6 +13,19 @@ function ok(data) {
   return { success: true, code: 0, data };
 }
 
+/** 真实版本号（之前写死 1.0.0，节点设置页「检测」会看到错版本） */
+function clientVersion() {
+  try {
+    const version = require('electron').app.getVersion();
+    if (version) return String(version);
+  } catch { /* 非 Electron 环境 */ }
+  try {
+    return String(require('../../package.json').version || '');
+  } catch {
+    return '';
+  }
+}
+
 function fail(msg, code = 1) {
   return { success: false, code, msg: String(msg) };
 }
@@ -101,7 +114,7 @@ function createRouter() {
       provider: 'tkswarm-browses',
       loggedIn: !!user,
       engine: resolveEngine(),
-      version: '1.0.0',
+      version: clientVersion(),
       dataRoot: DATA_ROOT,
     }));
   });
