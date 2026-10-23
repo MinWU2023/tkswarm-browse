@@ -98,35 +98,36 @@ async function launchProfileInProcess(profile, options = {}) {
   };
 
   const { session: { fromPartition } } = electron();
-  const ses = fromPartition(`persist:env-${id}`);
+  const contentSes = fromPartition(`persist:env-${id}`);
+  const shellSes = fromPartition(`env-chrome-shell-${id}`, { cache: false });
   if (userAgent) {
-    try { ses.setUserAgent(userAgent, locale); } catch { ses.setUserAgent(userAgent); }
+    try { contentSes.setUserAgent(userAgent, locale); } catch { contentSes.setUserAgent(userAgent); }
   }
-  if (proxy.proxyArg) {
-    const rules = proxy.proxyRules || String(proxy.proxyArg).replace(/^--proxy-server=/, '');
-    await ses.setProxy({ proxyMode: 'fixed_servers', proxyRules: rules, proxyBypassRules: '' });
-    appendEnvLog(id, `代理: ${rules}`);
-  } else {
-    await ses.setProxy({ proxyMode: 'direct' });
+  try {
+    await shellSes.setProxy({ proxyMode: 'direct' });
+  } catch (error) {
+    appendEnvLog(id, `工具栏 session 直连设置失败: ${error?.message || error}`);
   }
-
-  const chrome = await createEnvChrome({
-    profileId: id,
-    userDataDir,
-    width,
-    height,
-    windowTitle,
-    startUrl,
-    ses,
-    headless,
-    log: (msg) => appendEnvLog(id, msg),
-  });
-  const win = chrome.window;
-
-  win.on('closed', () => {
-    windows.delete(id);
-    try { proxy.release?.(); } catch { /* */ }
-  });
+  const proxyRules = proxy.proxyArg
+    ? (proxy.proxyRules || String(proxy.proxyArg).replace(/^--proxy-server=/, ''))
+    : '';
+  async function ensureContentProxy() {
+    if (!proxyRules) {
+      await contentSes.setProxy({ proxyMode: 'direct' });
+      return;
+    }
+    await contentSes.setProxy({
+      proxyMode: 'fixed_servers',
+      proxyRules,
+      proxyBypassRules: '<local>',
+    });
+  }
+  try {
+    await ensureContentProxy();
+    appendEnvLog(id, proxyRules ? `代理（仅内容标签页）: ${proxyRules}` : '代理: 直连');
+  } catch (error) {
+    appendEnvLog(id, `代理设置失败: ${error?.message || error}`);
+  }
 
   const bindContentEvents = (wc) => {
     if (!wc) return;
@@ -181,7 +182,27 @@ async function launchProfileInProcess(profile, options = {}) {
     });
   };
 
-  bindContentEvents(chrome.getActiveWebContents());
+  const chrome = await createEnvChrome({
+    profileId: id,
+    userDataDir,
+    width,
+    height,
+    windowTitle,
+    startUrl,
+    shellSession: shellSes,
+    contentSession: contentSes,
+    ensureContentProxy,
+    onContentWebContents: (wc) => bindContentEvents(wc),
+    headless,
+    log: (msg) => appendEnvLog(id, msg),
+  });
+  const win = chrome.window;
+
+  win.on('closed', () => {
+    windows.delete(id);
+    try { proxy.release?.(); } catch { /* */ }
+  });
+
   await revealEnvWindow(win, id, { headless });
 
   const activeWc = chrome.getActiveWebContents();

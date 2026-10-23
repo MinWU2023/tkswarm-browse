@@ -12,9 +12,11 @@ function argIpc() {
 
 ipcPrefix = argIpc();
 
-ipcRenderer.on('env-chrome-bind', (_e, prefix) => {
+function bindPrefix(prefix) {
   if (prefix) ipcPrefix = prefix;
-});
+}
+
+ipcRenderer.on('env-chrome-bind', (_e, prefix) => bindPrefix(prefix));
 
 function invoke(method, ...args) {
   if (!ipcPrefix) return Promise.resolve();
@@ -40,7 +42,15 @@ contextBridge.exposeInMainWorld('envChrome', {
       if (!ipcPrefix) return;
       ipcRenderer.on(`${ipcPrefix}:state`, handler);
     };
-    ipcRenderer.on('env-chrome-bind', () => listen());
+    const onBind = (_e, prefix) => {
+      bindPrefix(prefix);
+      listen();
+    };
+    ipcRenderer.on('env-chrome-bind', onBind);
+    // 主进程实际发送的是 `${ipcPrefix}:bind`
+    if (ipcPrefix) {
+      ipcRenderer.on(`${ipcPrefix}:bind`, onBind);
+    }
     listen();
     return () => ipcRenderer.removeListener(`${ipcPrefix}:state`, handler);
   },

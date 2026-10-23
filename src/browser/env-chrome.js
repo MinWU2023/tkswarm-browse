@@ -1,5 +1,6 @@
 /**
  * 环境窗浏览器外壳：标签页 + 地址栏 + 前进后退 + 浏览历史（BrowserView）
+ * 工具栏（shell）与内容页必须用不同 session：shell 直连，内容页走代理。
  */
 const { BrowserWindow, BrowserView, ipcMain } = require('electron');
 const fs = require('node:fs');
@@ -61,6 +62,11 @@ function normalizeUrl(input) {
 
 /**
  * @param {object} opts
+ * @param {Electron.Session} [opts.shellSession] 工具栏 session（应直连，不走代理）
+ * @param {Electron.Session} [opts.contentSession] 标签页 session（Profile + 代理）
+ * @param {Electron.Session} [opts.ses] 兼容旧参数，等同 contentSession
+ * @param {() => Promise<void>} [opts.ensureContentProxy] 导航前重新 setProxy
+ * @param {(wc: Electron.WebContents) => void} [opts.onContentWebContents] 每个标签页创建时回调
  * @returns {Promise<{ window: BrowserWindow, getActiveWebContents: Function, pickBrowsingCdpPage: Function }>}
  */
 async function createEnvChrome(opts) {
@@ -71,10 +77,20 @@ async function createEnvChrome(opts) {
     height = 800,
     windowTitle,
     startUrl,
+    shellSession,
+    contentSession,
     ses,
+    ensureContentProxy,
+    onContentWebContents,
     headless = false,
     log = () => {},
   } = opts;
+
+  const browseSes = contentSession || ses;
+  const uiSes = shellSession || browseSes;
+  if (!browseSes) {
+    throw new Error('createEnvChrome: 缺少 contentSession');
+  }
 
   const history = loadHistory(userDataDir);
   const tabs = [];
@@ -94,6 +110,7 @@ async function createEnvChrome(opts) {
     autoHideMenuBar: true,
     backgroundColor: '#e8eaed',
     webPreferences: {
+      session: uiSes,
       preload: SHELL_PRELOAD,
       contextIsolation: true,
       nodeIntegration: false,
@@ -103,6 +120,24 @@ async function createEnvChrome(opts) {
   });
   applyWindowIcon(win);
   try { win.setMenuBarVisibility(false); } catch { /* */ }
+
+  async function beforeBrowseNav() {
+    if (typeof ensureContentProxy === 'function') {
+      try { await ensureContentProxy(); } catch (error) {
+        log(`导航前重设代理失败: ${error?.message || error}`);
+      }
+    }
+  }
+
+  function pauseInactiveTabs(exceptId) {
+    for (const [tid, view] of views) {
+      if (tid === exceptId) continue;
+      try {
+        const wc = view.webContents;
+        if (wc && !wc.isDestroyed() && wc.isLoading()) wc.stop();
+      } catch { /* */ }
+    }
+  }
 
   function pushHistory(url, title) {
     if (!url || isShellUrl(url) || url.startsWith('file:')) return;
@@ -146,6 +181,7 @@ async function createEnvChrome(opts) {
   function switchTab(id) {
     const view = views.get(id);
     if (!view) return;
+    pauseInactiveTabs(id);
     for (const v of win.getBrowserViews()) {
       try { win.removeBrowserView(v); } catch { /* */ }
     }
@@ -157,6 +193,9 @@ async function createEnvChrome(opts) {
 
   function wireView(id, view, tab) {
     const wc = view.webContents;
+    if (typeof onContentWebContents === 'function') {
+      try { onContentWebContents(wc); } catch { /* */ }
+    }
     wc.on('page-title-updated', (_e, title) => {
       tab.title = title || tab.url || '新标签页';
       sendState();
@@ -171,17 +210,27 @@ async function createEnvChrome(opts) {
       sendState();
     });
     wc.on('did-finish-load', () => sendState());
-    wc.on('did-fail-load', (_e, code, _desc, url, isMainFrame) => {
+    wc.on('did-fail-load', (_e, code, desc, url, isMainFrame) => {
       if (!isMainFrame || code === -3) return;
-      log(`标签页加载失败 code=${code} url=${url}`);
+      log(`标签页加载失败 code=${code} url=${url} ${desc || ''}`);
     });
+  }
+
+  async function loadInActiveView(url) {
+    const view = activeView();
+    if (!view) return;
+    await beforeBrowseNav();
+    pauseInactiveTabs(activeTabId);
+    const wc = view.webContents;
+    if (wc.isLoading()) wc.stop();
+    await wc.loadURL(normalizeUrl(url));
   }
 
   function createTab(url, activate = true) {
     const id = nextTabId++;
     const view = new BrowserView({
       webPreferences: {
-        session: ses,
+        session: browseSes,
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: false,
@@ -193,8 +242,10 @@ async function createEnvChrome(opts) {
     views.set(id, view);
     wireView(id, view, tab);
     if (activate) switchTab(id);
-    view.webContents.loadURL(tab.url).catch((err) => {
-      log(`loadURL 失败: ${err?.message || err}`);
+    void beforeBrowseNav().then(() => {
+      view.webContents.loadURL(tab.url).catch((err) => {
+        log(`loadURL 失败: ${err?.message || err}`);
+      });
     });
     return id;
   }
@@ -229,17 +280,35 @@ async function createEnvChrome(opts) {
   const ipcHandlers = [
     [`${ipcPrefix}:ready`, async () => sendState()],
     [`${ipcPrefix}:navigate`, async (_e, url) => {
-      const target = normalizeUrl(url);
-      const view = activeView();
-      if (view) await view.webContents.loadURL(target);
+      await loadInActiveView(url);
       sendState();
     }],
-    [`${ipcPrefix}:back`, async () => { activeView()?.webContents.goBack(); sendState(); }],
-    [`${ipcPrefix}:forward`, async () => { activeView()?.webContents.goForward(); sendState(); }],
-    [`${ipcPrefix}:reload`, async () => { activeView()?.webContents.reload(); sendState(); }],
+    [`${ipcPrefix}:back`, async () => {
+      await beforeBrowseNav();
+      pauseInactiveTabs(activeTabId);
+      const wc = activeView()?.webContents;
+      if (wc?.canGoBack()) wc.goBack();
+      sendState();
+    }],
+    [`${ipcPrefix}:forward`, async () => {
+      await beforeBrowseNav();
+      pauseInactiveTabs(activeTabId);
+      const wc = activeView()?.webContents;
+      if (wc?.canGoForward()) wc.goForward();
+      sendState();
+    }],
+    [`${ipcPrefix}:reload`, async () => {
+      await beforeBrowseNav();
+      pauseInactiveTabs(activeTabId);
+      const wc = activeView()?.webContents;
+      if (wc) {
+        if (wc.isLoading()) wc.stop();
+        wc.reload();
+      }
+      sendState();
+    }],
     [`${ipcPrefix}:home`, async () => {
-      const view = activeView();
-      if (view) await view.webContents.loadURL(normalizeUrl(startUrl));
+      await loadInActiveView(startUrl);
       sendState();
     }],
     [`${ipcPrefix}:new-tab`, async (_e, url) => {
@@ -248,8 +317,7 @@ async function createEnvChrome(opts) {
     [`${ipcPrefix}:switch-tab`, async (_e, tabId) => { switchTab(Number(tabId)); }],
     [`${ipcPrefix}:close-tab`, async (_e, tabId) => { closeTab(Number(tabId)); }],
     [`${ipcPrefix}:open-history`, async (_e, url) => {
-      const view = activeView();
-      if (view) await view.webContents.loadURL(normalizeUrl(url));
+      await loadInActiveView(url);
       sendState();
     }],
     [`${ipcPrefix}:clear-history`, async () => {

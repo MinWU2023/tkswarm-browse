@@ -278,10 +278,16 @@ function bindContentWatchers(webContents, proxyDisplay) {
 app.whenReady().then(async () => {
   logLine(`启动环境窗口 v${app.getVersion()} profile=${profileId} headless=${cfg.headless ? 1 : 0} target=${targetUrl} PROXY_BRIDGE_REV=${PROXY_BRIDGE_REV} PROXY_MAX_TUNNELS=${MAX_ACTIVE_TUNNELS}`);
 
-  const ses = session.defaultSession;
+  const contentSes = session.defaultSession;
+  const shellSes = session.fromPartition(`env-chrome-shell-${profileId}`, { cache: false });
+  try {
+    await shellSes.setProxy({ proxyMode: 'direct' });
+  } catch (error) {
+    logLine(`工具栏 session 直连设置失败: ${error?.message || error}`);
+  }
   if (cfg.userAgent) {
     try {
-      ses.setUserAgent(String(cfg.userAgent), String(cfg.acceptLanguages || 'en-US'));
+      contentSes.setUserAgent(String(cfg.userAgent), String(cfg.acceptLanguages || 'en-US'));
     } catch { /* 老版本 Electron 只支持单参数 */ }
   }
   let proxyRules = String(cfg.proxyServer || '').trim();
@@ -308,37 +314,24 @@ app.whenReady().then(async () => {
       logLine(`子进程代理桥启动失败: ${error?.message || error}`);
     }
   }
+  async function ensureContentProxy() {
+    if (!proxyRules) return;
+    await contentSes.setProxy({
+      proxyMode: 'fixed_servers',
+      proxyRules,
+      proxyBypassRules: '<local>',
+    });
+  }
+
   if (proxyRules) {
     try {
-      await ses.setProxy({
-        proxyMode: 'fixed_servers',
-        proxyRules,
-        proxyBypassRules: '',
-      });
-      logLine(`代理已设置: ${proxyRules}`);
+      await ensureContentProxy();
+      logLine(`代理已设置（仅内容标签页）: ${proxyRules}`);
     } catch (error) {
       logLine(`代理设置失败: ${error?.message || error}`);
     }
   }
 
-  const chrome = await createEnvChrome({
-    profileId,
-    userDataDir: String(cfg.userDataDir || ''),
-    width: Number(cfg.width) || 1280,
-    height: Number(cfg.height) || 800,
-    windowTitle,
-    startUrl: targetUrl,
-    ses,
-    headless: Boolean(cfg.headless),
-    log: logLine,
-  });
-  win = chrome.window;
-  win.on('closed', () => {
-    win = null;
-    app.quit();
-  });
-
-  const contentWc = chrome.getActiveWebContents();
   const bridgeHint = (() => {
     if (!cfg.proxyMeta?.proxy_host) return '';
     const isLocalBridge = /^socks5:\/\/127\.0\.0\.1:\d+$/i.test(String(proxyRules || ''));
@@ -349,7 +342,28 @@ app.whenReady().then(async () => {
   const proxyDisplay = cfg.proxyMeta?.proxy_host
     ? `上游 ${cfg.proxyMeta.proxy_type}://${cfg.proxyMeta.proxy_host}:${cfg.proxyMeta.proxy_port}${bridgeHint}`
     : (proxyRules || cfg.proxyServer || '直连（未绑定代理）');
-  bindContentWatchers(contentWc, proxyDisplay);
+
+  const chrome = await createEnvChrome({
+    profileId,
+    userDataDir: String(cfg.userDataDir || ''),
+    width: Number(cfg.width) || 1280,
+    height: Number(cfg.height) || 800,
+    windowTitle,
+    startUrl: targetUrl,
+    shellSession: shellSes,
+    contentSession: contentSes,
+    ensureContentProxy,
+    onContentWebContents: (wc) => bindContentWatchers(wc, proxyDisplay),
+    headless: Boolean(cfg.headless),
+    log: logLine,
+  });
+  win = chrome.window;
+  win.on('closed', () => {
+    win = null;
+    app.quit();
+  });
+
+  const contentWc = chrome.getActiveWebContents();
   contentWc?.on('unresponsive', () => logLine('窗口无响应（unresponsive）'));
   contentWc?.on('responsive', () => logLine('窗口恢复响应'));
   logLine('环境浏览器外壳已就绪');
@@ -368,7 +382,7 @@ app.whenReady().then(async () => {
         proxyProbeText = text;
         logLine(`代理自检: ${text}`);
         try {
-          const wc = win?.webContents;
+          const wc = chrome.getActiveWebContents();
           const href = wc?.getURL() || '';
           if (settled && wc && (href.startsWith('data:') || href.startsWith('file:'))) {
             showDiagnosticOnWebContents(wc, profileId, {
