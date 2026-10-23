@@ -318,7 +318,29 @@ function setApiToken(token) {
     const user = data.users.length
       ? [...data.users].sort((a, b) => String(b.logged_in_at).localeCompare(String(a.logged_in_at)))[0]
       : null;
-    data.sessions = [{ token: String(token), user_id: user?.id || 0, created_at: new Date().toISOString() }];
+    const row = {
+      token: String(token),
+      user_id: user?.id || 0,
+      created_at: new Date().toISOString(),
+    };
+    // 同一台机器上 A/B 交替登录时，不能把对方的 token 顶掉，
+    // 否则服务端无法判断「这次请求到底是谁」，环境共用必然出问题。保留最近 8 个。
+    const list = (Array.isArray(data.sessions) ? data.sessions : [])
+      .filter((s) => s && String(s.token) !== row.token);
+    list.unshift(row);
+    data.sessions = list.slice(0, 8);
+  });
+}
+
+/** 按 Bearer token 反查用户，用于把请求归到真正的操作者 */
+function getUserByToken(token) {
+  const key = String(token || '').trim();
+  if (!key) return null;
+  return readOnly((d) => {
+    const session = (d.sessions || []).find((s) => String(s.token) === key);
+    if (!session) return null;
+    if (!session.user_id) return null;
+    return d.users.find((u) => Number(u.id) === Number(session.user_id)) || null;
   });
 }
 
@@ -351,6 +373,7 @@ module.exports = {
   statsAllOwners,
   countProfilesByOwner,
   setApiToken,
+  getUserByToken,
   validateApiToken,
   MAX_ENVS_PER_USER,
 };

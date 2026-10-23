@@ -30,23 +30,59 @@ function fail(msg, code = 1) {
   return { success: false, code, msg: String(msg) };
 }
 
+/**
+ * 解析这次请求是谁发起的。
+ * 优先用 Bearer token 反查（A/B 各自的 token 都保留着），
+ * 查不到再退回「本机最近登录的用户」，保证老调用方不报错。
+ */
+function resolveRequestUser(req) {
+  const raw = String(req?.headers?.authorization || '');
+  const token = raw.replace(/^Bearer\s+/i, '').trim();
+  if (token) {
+    try {
+      const fromToken = db.getUserByToken(token);
+      if (fromToken) return fromToken;
+    } catch { /* 忽略，走兜底 */ }
+  }
+  return getCurrentUser();
+}
+
 function authMiddleware(req, res, next) {
-  const user = getCurrentUser();
+  const user = resolveRequestUser(req);
   if (!user) {
     return res.json(fail('Login out'));
   }
-  // 桌面端已登录即可；Node 侧 Bearer 可能与本地会话轮换不一致，不再校验 Token
+  // 本机共用：不再因为 Bearer Token 与本地会话轮换不一致就拒绝请求
   req.currentUser = user;
   next();
 }
 
+/** 严格按 owner_id 隔离（老行为）。默认关闭：本机环境是共用的。 */
+function strictEnvOwner() {
+  return String(process.env.TKSWARM_STRICT_ENV_OWNER || '').trim() === '1';
+}
+
 /**
- * 环境权限：本机环境共用（任意登录用户可打开/查看）；写操作仍限创建者或超管。
- * 创建额度 300/用户 在 db.createProfile 单独校验，与打开权限无关。
+ * 环境权限
+ * ---------------------------------------------------------------
+ * 本机环境是「共用」的：同一个 data 目录里的环境，任何已登录用户都能查看、
+ * 打开、改配置、清理、删除。
+ *
+ * 为什么必须这样：A 用户把账号 1 绑定到某个环境后，B 用户在同一台机器上登录，
+ * 若按 owner_id 拦截，B 打开/刷新这个环境就会被判「无权修改」而报错——
+ * 但机器只有一台、数据只有一份，这个壁垒没有任何意义，只会让人没法干活。
+ * 本机没有真正的多租户边界，靠 owner_id 拦住的是自己人。
+ *
+ * owner_id 仍然保留，只用于记录创建者和统计每人创建额度。
+ * 真要隔离的机器可设 TKSWARM_STRICT_ENV_OWNER=1 退回旧行为。
  */
 function assertProfileOwner(user, profile, opts = {}) {
-  const write = !!opts.write;
   if (!profile) return { ok: false, msg: 'browser环境不存在或已删除' };
+  if (!user) return { ok: false, msg: 'Login out' };
+  if (!strictEnvOwner()) return { ok: true };
+
+  // —— 以下只在严格模式生效 ——
+  const write = !!opts.write;
   if (Number(user.is_super) === 1) return { ok: true };
   if (!write) return { ok: true };
   const owner = Number(profile.owner_id || 0);
@@ -122,9 +158,9 @@ function createRouter() {
   router.post('/group/list', authMiddleware, (req, res) => {
     const page = Number(req.body?.page || 0);
     const pageSize = Number(req.body?.pageSize || 100);
-    const user = req.currentUser;
-    const ownerFilter = Number(user.is_super) === 1 ? null : Number(user.id);
-    const all = db.listGroups({ ownerId: ownerFilter });
+    // 环境是本机共用的，分组也必须共用：否则 A 建的分组 B 看不到，
+    // 环境挂在不存在的分组下，界面就会缺组或报错。
+    const all = db.listGroups({ ownerId: null });
     const limit = Math.min(500, Math.max(1, pageSize));
     const offset = Math.max(0, page) * limit;
     const list = all.slice(offset, offset + limit).map((g) => ({

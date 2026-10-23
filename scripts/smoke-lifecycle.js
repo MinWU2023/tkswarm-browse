@@ -396,7 +396,7 @@ async function main() {
     else fail('coreVersion 148', JSON.stringify({ kid, kver }));
     if (kid) await post(url, '/browser/delete', { id: kid });
 
-    // owner 隔离：换用户后不可操作他人环境
+    // 本机环境共用：换个用户照样能改（A 绑定过的环境，B 不能报错）
     db.saveUser({
       id: 2002,
       username: 'smoke-other',
@@ -406,11 +406,22 @@ async function main() {
       is_super: 0,
       parent_id: 0,
     });
-    const denied = await post(url, '/browser/detail', { id: profileId }, TOKEN + '-other');
+    const shared = await post(url, '/browser/update/partial', {
+      id: profileId, remark: 'written-by-other-user',
+    }, TOKEN + '-other');
+    if (shared?.success) log('env shared across users', true);
+    else fail('env shared across users', JSON.stringify(shared));
+
+    // 需要真隔离的机器可开严格模式，行为退回老逻辑（写操作仅创建者）
+    process.env.TKSWARM_STRICT_ENV_OWNER = '1';
+    const denied = await post(url, '/browser/update/partial', {
+      id: profileId, remark: 'should-be-denied',
+    }, TOKEN + '-other');
+    delete process.env.TKSWARM_STRICT_ENV_OWNER;
     if (!denied?.success && /无权|不存在/.test(String(denied?.msg || ''))) {
-      log('owner isolation', true, denied.msg);
+      log('strict owner isolation', true, denied.msg);
     } else {
-      fail('owner isolation', JSON.stringify(denied));
+      fail('strict owner isolation', JSON.stringify(denied));
     }
 
     // clear API
