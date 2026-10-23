@@ -6,7 +6,7 @@
 const net = require('node:net');
 
 /** 代理桥实现版本（发版后对照 env 日志，避免误用旧 dist/ 或未下载的新 Release） */
-const PROXY_BRIDGE_REV = '3';
+const PROXY_BRIDGE_REV = '4';
 
 /** @type {Map<string, { server: net.Server, port: number, refs: number }>} */
 const bridges = new Map();
@@ -294,16 +294,19 @@ function parseSocksClientRequest(buf) {
   };
 }
 
-function handleSocksClient(client, profile, onError) {
+function handleSocksClient(client, profile, onError, onLog) {
   const upHost = String(profile.proxy_host);
   const upPort = Number(profile.proxy_port);
   const user = String(profile.proxy_user || '');
   const pass = String(profile.proxy_pass || '');
   const type = String(profile.proxy_type || 'socks5').toLowerCase();
+  const log = typeof onLog === 'function' ? onLog : () => {};
 
   let buf = Buffer.alloc(0);
   let stage = 'greeting';
   let upstream = null;
+  let tunnelUp = 0;
+  let tunnelDown = 0;
   const clientPending = [];
 
   const destroyBoth = () => {
@@ -318,26 +321,38 @@ function handleSocksClient(client, profile, onError) {
     destroyBoth();
   };
 
-  const startTunnel = (up, leftover) => {
+  const startTunnel = (up, leftover, dest) => {
     upstream = up;
     client.write(Buffer.from([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
     if (leftover.length) up.write(leftover);
     for (const pending of clientPending) up.write(pending);
     clientPending.length = 0;
     stage = 'tunnel';
-    up.on('error', () => destroyBoth());
+    log(`隧道建立 → ${dest?.host || '?'}:${dest?.port || 0}`);
+    up.on('error', (error) => {
+      log(`隧道上游错误: ${error?.message || error}`);
+      destroyBoth();
+    });
     client.on('error', () => destroyBoth());
-    client.on('close', () => { try { up.destroy(); } catch { /* */ } });
-    up.on('close', () => { try { client.destroy(); } catch { /* */ } });
+    client.on('close', () => {
+      log(`客户端关闭（上行 ${tunnelUp}B / 下行 ${tunnelDown}B）`);
+      try { up.destroy(); } catch { /* */ }
+    });
+    up.on('close', () => {
+      log(`上游关闭（上行 ${tunnelUp}B / 下行 ${tunnelDown}B）`);
+      try { client.destroy(); } catch { /* */ }
+    });
+    // 只走 pipe 转发；曾经同时在 data 事件里写一次，导致同一份字节发两遍，TLS 握手必然失败
     client.pipe(up);
     up.pipe(client);
+    client.on('data', (chunk) => { tunnelUp += chunk.length; });
+    up.on('data', (chunk) => { tunnelDown += chunk.length; });
   };
 
   client.on('error', () => destroyBoth());
   client.on('data', (chunk) => {
     if (stage === 'tunnel') {
-      if (upstream) upstream.write(chunk);
-      else clientPending.push(chunk);
+      // 隧道阶段的数据由 client.pipe(upstream) 转发，这里只做计数，绝不能再写一次
       return;
     }
     if (stage === 'connecting') {
@@ -380,7 +395,7 @@ function handleSocksClient(client, profile, onError) {
       void connectUp
         .then((up) => {
           client.resume();
-          startTunnel(up, leftover);
+          startTunnel(up, leftover, dest);
         })
         .catch((error) => {
           if (onError) onError(error, dest);
@@ -391,7 +406,7 @@ function handleSocksClient(client, profile, onError) {
   });
 }
 
-function startLocalSocksBridge(profile, onError) {
+function startLocalSocksBridge(profile, onError, onLog) {
   const key = bridgeKey(profile);
   const existing = bridges.get(key);
   if (existing) {
@@ -401,7 +416,7 @@ function startLocalSocksBridge(profile, onError) {
 
   return new Promise((resolve, reject) => {
     const server = net.createServer((client) => {
-      handleSocksClient(client, profile, onError);
+      handleSocksClient(client, profile, onError, onLog);
     });
 
     server.on('error', reject);
@@ -450,7 +465,8 @@ async function resolveChromeProxy(profile, opts = {}) {
   }
 
   const onError = typeof opts.onError === 'function' ? opts.onError : null;
-  const bridge = await startLocalSocksBridge(profile, onError);
+  const onLog = typeof opts.onLog === 'function' ? opts.onLog : null;
+  const bridge = await startLocalSocksBridge(profile, onError, onLog);
   const rules = formatProxyRules(bridge.port);
   return {
     proxyArg: `--proxy-server=${rules}`,

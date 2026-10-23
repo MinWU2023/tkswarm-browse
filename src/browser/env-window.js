@@ -282,6 +282,7 @@ app.whenReady().then(async () => {
           const target = dest ? `${dest.host}:${dest.port}` : '';
           logLine(`子进程代理桥转发失败${target ? ` → ${target}` : ''}: ${error?.message || error}`);
         },
+        onLog: (message) => logLine(`[bridge] ${message}`),
       });
       releaseProxy = local.release || (() => {});
       proxyRules = local.proxyRules || String(local.proxyArg || '').replace(/^--proxy-server=/, '');
