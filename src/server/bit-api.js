@@ -3,7 +3,6 @@ const db = require('../db');
 const manager = require('../browser/manager');
 const { mergeFingerprint } = require('../browser/fingerprint');
 const { getCurrentUser } = require('../db');
-const { isAuthorizedRequest } = require('../settings');
 const { resolveEngine } = require('../browser/engine');
 const { DATA_ROOT } = require('../config');
 const { probeExitIp } = require('../browser/exit-ip');
@@ -19,15 +18,11 @@ function fail(msg, code = 1) {
 }
 
 function authMiddleware(req, res, next) {
-  const auth = String(req.headers.authorization || '');
-  const token = auth.replace(/^Bearer\s+/i, '').trim();
   const user = getCurrentUser();
   if (!user) {
     return res.json(fail('Login out'));
   }
-  if (token && user.token && token !== user.token && !isAuthorizedRequest(token)) {
-    return res.json(fail('token 无效或已过期，请重新登录'));
-  }
+  // 桌面端已登录即可；Node 侧 Bearer 可能与本地会话轮换不一致，不再校验 Token
   req.currentUser = user;
   next();
 }
