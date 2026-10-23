@@ -152,7 +152,7 @@ async function launchProfileElectron(profile, options = {}) {
     `--user-agent=${userAgent}`,
   ];
   if (!packaged) args.unshift(APP_ROOT);
-  if (proxy.proxyArg && !proxyMeta) args.push(proxy.proxyArg);
+  // 代理由子进程 env-window 根据 envConfig.proxyMeta 建本地桥，父进程不再传 --proxy-server
   if (headless) args.push('--tkswarm-headless');
 
   const portableDir = process.env.PORTABLE_EXECUTABLE_DIR || path.dirname(electronBin);
