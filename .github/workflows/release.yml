@@ -25,6 +25,7 @@ jobs:
       - name: Install & build Windows (NSIS + portable)
         run: |
           npm ci
+          npm run icons
           npm run dist:win
       - name: Verify Windows artifacts
         shell: pwsh
@@ -39,6 +40,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: TkSwarmBrowser-Windows
+          retention-days: 7
+          if-no-files-found: error
           path: |
             dist/*-setup.exe
             dist/*-portable.exe
@@ -55,6 +58,7 @@ jobs:
       - name: Install & build macOS (DMG + ZIP, x64 + arm64)
         run: |
           npm ci
+          npm run icons
           npm run dist:mac
       - name: Verify macOS artifacts
         run: |
@@ -66,6 +70,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: TkSwarmBrowser-macOS
+          retention-days: 7
+          if-no-files-found: error
           path: |
             dist/*.dmg
             dist/*.zip
@@ -74,11 +80,29 @@ jobs:
     needs: [build-win, build-mac]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
+      # download-artifact 偶发 ECONNRESET；用 gh run download + 重试更稳
+      - name: Download build artifacts (retry)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          for attempt in 1 2 3 4 5; do
+            echo "Download attempt ${attempt}/5 ..."
+            if gh run download "${{ github.run_id }}" -D artifacts; then
+              echo "Artifacts downloaded."
+              ls -laR artifacts || true
+              exit 0
+            fi
+            wait=$((attempt * 15))
+            echo "Download failed (often ECONNRESET), retry in ${wait}s ..."
+            sleep "$wait"
+          done
+          echo "All download attempts failed." >&2
+          exit 1
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}

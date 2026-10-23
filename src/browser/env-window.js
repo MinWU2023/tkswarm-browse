@@ -16,7 +16,7 @@
  */
 const { app, session } = require('electron');
 const { createEnvChrome } = require('./env-chrome');
-const { resolveChromeProxy, PROXY_BRIDGE_REV, MAX_ACTIVE_TUNNELS } = require('./proxy-auth');
+const { resolveChromeProxy, PROXY_BRIDGE_REV, MAX_ACTIVE_TUNNELS, HANDSHAKE_LIMIT, describeUpstreamRoute } = require('./proxy-auth');
 const { probeProxySummary, probeBurst } = require('./proxy-probe');
 const { showDiagnosticOnWebContents, inspectBlankContentOnWc } = require('./env-window-ui');
 const fs = require('node:fs');
@@ -276,7 +276,8 @@ function bindContentWatchers(webContents, proxyDisplay) {
 
 /* ---------------- 启动 ---------------- */
 app.whenReady().then(async () => {
-  logLine(`启动环境窗口 v${app.getVersion()} profile=${profileId} headless=${cfg.headless ? 1 : 0} target=${targetUrl} PROXY_BRIDGE_REV=${PROXY_BRIDGE_REV} PROXY_MAX_TUNNELS=${MAX_ACTIVE_TUNNELS}`);
+  logLine(`启动环境窗口 v${app.getVersion()} profile=${profileId} headless=${cfg.headless ? 1 : 0} target=${targetUrl} PROXY_BRIDGE_REV=${PROXY_BRIDGE_REV} PROXY_HANDSHAKE_LIMIT=${HANDSHAKE_LIMIT} PROXY_MAX_TUNNELS=${MAX_ACTIVE_TUNNELS}`);
+  describeUpstreamRoute().then((route) => logLine(`上游链路：${route}`)).catch(() => {});
 
   const contentSes = session.defaultSession;
   const shellSes = session.fromPartition(`env-chrome-shell-${profileId}`, { cache: false });
@@ -368,19 +369,26 @@ app.whenReady().then(async () => {
   contentWc?.on('responsive', () => logLine('窗口恢复响应'));
   logLine('环境浏览器外壳已就绪');
 
-  // 上游代理自检：与开窗并行，不拖慢打开速度；结果写日志，并在诊断页补上结论
+  // 上游代理自检：顺序探测 + 延迟并发测试，避免和 TikTok 首屏抢代理连接
   if (cfg.proxyMeta?.proxy_host) {
-    void probeProxySummary(cfg.proxyMeta, { timeoutMs: 7000 })
+    void probeProxySummary(cfg.proxyMeta, { timeoutMs: 5000 })
       .then(async (text) => {
-        try {
-          const burst = await probeBurst(cfg.proxyMeta, { count: 6, timeoutMs: 8000 });
-          const hint = burst.ok > 0
-            ? `；并发探测 ${burst.ok}/${burst.count} 条同时成功（代理套餐并发约 ${burst.ok}，可设 TKSWARM_PROXY_MAX_TUNNELS=${Math.max(2, burst.ok)}）`
-            : `；并发探测 0/${burst.count}（代理可能暂不可用或并发极低）`;
-          text = `${text}${hint}`;
-        } catch { /* */ }
         proxyProbeText = text;
         logLine(`代理自检: ${text}`);
+        try {
+          await new Promise((r) => setTimeout(r, 12000));
+          const burst = await probeBurst(cfg.proxyMeta, {
+            count: 3,
+            timeoutMs: 5000,
+            sequential: true,
+            gapMs: 200,
+          });
+          const hint = burst.ok > 0
+            ? `；顺序并发探测 ${burst.ok}/${burst.count} 成功（可设 TKSWARM_PROXY_MAX_TUNNELS=${Math.max(2, burst.ok)}）`
+            : `；顺序并发探测 0/${burst.count}（页面加载期间请勿重复刷新）`;
+          proxyProbeText = `${text}${hint}`;
+          logLine(`代理自检(延迟): ${hint}`);
+        } catch { /* */ }
         try {
           const wc = chrome.getActiveWebContents();
           const href = wc?.getURL() || '';
@@ -389,7 +397,7 @@ app.whenReady().then(async () => {
               url: targetUrl,
               proxy: proxyDisplay,
               userDataDir: String(cfg.userDataDir || ''),
-              probe: text,
+              probe: proxyProbeText || text,
               reason: '代理不可用（见「代理自检」）',
               detail: '上游代理没能建立到目标站点的连接，页面未加载',
             }).catch(() => {});

@@ -4,56 +4,342 @@
  * 打包后可在 env-*.log 搜 PROXY_BRIDGE_REV 确认是否为新桥代码。
  */
 const net = require('node:net');
+const http = require('node:http');
+const { execFile } = require('node:child_process');
 
 /** 代理桥实现版本（发版后对照 env 日志，避免误用旧 dist/ 或未下载的新 Release） */
-const PROXY_BRIDGE_REV = '8';
+const PROXY_BRIDGE_REV = '10';
+
+/* ------------------------------------------------------------------ *
+ * 前置系统代理（v2ray / clash / 公司代理）
+ *
+ * 大陆机器直连海外住宅代理的高位端口，TCP 常常直接超时或被重置
+ * （日志里就是 connect ETIMEDOUT / read ECONNRESET），这跟账密无关。
+ * 比特浏览器能稳，是因为它自带的 Chromium 打了补丁：连上游代理时先借道
+ * 系统代理。这里在桥里做同样的事——探测 Windows 系统代理，用它 CONNECT
+ * 到上游代理，再在上游代理里做 SOCKS5 握手。
+ * 设置 TKSWARM_NO_SYSTEM_PROXY=1 可关闭。
+ * ------------------------------------------------------------------ */
+
+const SYS_PROXY_TTL_MS = 60000;
+const SYS_PROXY_MISS_TTL_MS = 5000;
+let sysProxyCache = { at: 0, value: null };
+let sysProxyInflight = null;
+
+function systemProxyDisabled() {
+  return String(process.env.TKSWARM_NO_SYSTEM_PROXY || '').trim() === '1';
+}
+
+/**
+ * 解析 Windows 的 ProxyServer 取值，兼容三种写法：
+ *   127.0.0.1:10809
+ *   http=127.0.0.1:10809;https=127.0.0.1:10809;socks=127.0.0.1:1080
+ *   http://127.0.0.1:10809
+ */
+function parseSystemProxyString(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return null;
+
+  const pick = (key) => {
+    const m = text.match(new RegExp(`(?:^|;)\\s*${key}\\s*=\\s*([^;]+)`, 'i'));
+    return m ? m[1].trim() : null;
+  };
+
+  let value = null;
+  let scheme = 'http';
+  if (text.includes('=')) {
+    const httpEntry = pick('http') || pick('https') || pick('proxy');
+    const socksEntry = pick('socks') || pick('socks5');
+    if (httpEntry) {
+      value = httpEntry;
+    } else if (socksEntry) {
+      value = socksEntry;
+      scheme = 'socks5';
+    } else {
+      return null;
+    }
+  } else {
+    value = text;
+  }
+
+  const cleaned = value.replace(/^[a-z0-9]+:\/\//i, '');
+  const m = cleaned.match(/^\[([0-9a-fA-F:]+)\]:(\d+)$/) || cleaned.match(/^([^:]+):(\d+)$/);
+  if (!m) return null;
+  const port = Number(m[2]);
+  if (!Number.isFinite(port) || port <= 0 || port >= 65536) return null;
+  return { type: scheme, host: m[1], port };
+}
+
+function queryWindowsSystemProxy() {
+  return new Promise((resolve) => {
+    execFile(
+      'reg',
+      ['query', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings'],
+      { windowsHide: true, timeout: 4000, maxBuffer: 1 << 20 },
+      (error, stdout) => {
+        if (error || !stdout) return resolve(null);
+        const enable = stdout.match(/ProxyEnable\s+REG_DWORD\s+0x([0-9a-fA-F]+)/);
+        const server = stdout.match(/ProxyServer\s+REG_SZ\s+([^\r\n]+)/);
+        if (!enable || parseInt(enable[1], 16) !== 1 || !server) return resolve(null);
+        return resolve(parseSystemProxyString(server[1]));
+      },
+    );
+  });
+}
+
+/** 环境变量兜底：不少代理工具会同时写 HTTP_PROXY / ALL_PROXY */
+function envSystemProxy() {
+  for (const key of ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'ALL_PROXY', 'all_proxy']) {
+    const raw = String(process.env[key] || '').trim();
+    if (!raw) continue;
+    const parsed = parseSystemProxyString(raw);
+    if (parsed) {
+      if (/^socks/i.test(raw)) parsed.type = 'socks5';
+      return parsed;
+    }
+  }
+  return null;
+}
+
+/**
+ * 探测系统前置代理；成功缓存 60s，失败只缓存 5s（读注册表偶尔会瞬时报错，
+ * 不能因为一次失败就把整条链路锁死在直连上）。
+ */
+async function detectSystemProxy() {
+  if (systemProxyDisabled()) return null;
+
+  const age = Date.now() - sysProxyCache.at;
+  const ttl = sysProxyCache.value ? SYS_PROXY_TTL_MS : SYS_PROXY_MISS_TTL_MS;
+  if (sysProxyCache.at > 0 && age < ttl) return sysProxyCache.value;
+  if (sysProxyInflight) return sysProxyInflight;
+
+  sysProxyInflight = (async () => {
+    let value = envSystemProxy();
+    if (!value) {
+      try {
+        if (process.platform === 'win32') value = await queryWindowsSystemProxy();
+      } catch {
+        value = null;
+      }
+    }
+    sysProxyCache = { at: Date.now(), value };
+    return value;
+  })();
+
+  try {
+    return await sysProxyInflight;
+  } finally {
+    sysProxyInflight = null;
+  }
+}
+
+/* ---------------- 建立到上游代理的基础连接（三种方式） ---------------- */
+
+function connectDirect(host, port, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const sock = net.connect({ host, port: Number(port), timeout: timeoutMs });
+    sock.once('connect', () => {
+      if (settled) return;
+      settled = true;
+      sock.setTimeout(timeoutMs);
+      resolve(sock);
+    });
+    sock.once('error', (err) => {
+      if (settled) return;
+      settled = true;
+      reject(err);
+    });
+    sock.once('timeout', () => {
+      if (settled) return;
+      settled = true;
+      sock.destroy();
+      reject(new Error(`TCP 连接上游代理超时（${timeoutMs}ms）`));
+    });
+  });
+}
+
+function viaHttpProxy(sysProxy, host, port, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const req = http.request({
+      host: sysProxy.host,
+      port: sysProxy.port,
+      method: 'CONNECT',
+      path: `${host}:${port}`,
+      agent: false,
+    });
+    const bail = (err) => {
+      if (settled) return;
+      settled = true;
+      try { req.destroy(); } catch { /* */ }
+      reject(err);
+    };
+    req.setTimeout(timeoutMs, () => bail(new Error(
+      `经系统前置代理 ${sysProxy.host}:${sysProxy.port} 连接上游超时（${timeoutMs}ms）`,
+    )));
+    req.once('connect', (res, socket) => {
+      if (settled) {
+        try { socket.destroy(); } catch { /* */ }
+        return;
+      }
+      settled = true;
+      if (res.statusCode !== 200) {
+        try { socket.destroy(); } catch { /* */ }
+        return reject(new Error(`系统前置代理 CONNECT 失败，状态码 ${res.statusCode}`));
+      }
+      socket.setTimeout(timeoutMs);
+      return resolve(socket);
+    });
+    req.once('error', bail);
+    req.end();
+  });
+}
+
+function viaSocksProxy(sysProxy, host, port, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let stage = 'greeting';
+    let buf = Buffer.alloc(0);
+    const sock = net.connect({ host: sysProxy.host, port: Number(sysProxy.port), timeout: timeoutMs });
+
+    const bail = (err) => {
+      if (settled) return;
+      settled = true;
+      try { sock.destroy(); } catch { /* */ }
+      reject(err);
+    };
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      sock.removeAllListeners('data');
+      sock.setTimeout(timeoutMs);
+      resolve(sock);
+    };
+
+    sock.once('error', bail);
+    sock.once('timeout', () => bail(new Error(
+      `经系统 SOCKS 代理 ${sysProxy.host}:${sysProxy.port} 连接上游超时（${timeoutMs}ms）`,
+    )));
+    sock.once('connect', () => sock.write(Buffer.from([0x05, 0x01, 0x00])));
+    sock.on('data', (chunk) => {
+      buf = Buffer.concat([buf, chunk]);
+      if (stage === 'greeting') {
+        if (buf.length < 2) return;
+        if (buf[0] !== 0x05) return bail(new Error('系统代理不是 SOCKS5'));
+        if (buf[1] === 0xFF) return bail(new Error('系统 SOCKS 代理要求认证，暂不支持'));
+        buf = buf.slice(2);
+        stage = 'connect';
+        sock.write(buildSocks5ConnectBuf({ host, port }));
+        return;
+      }
+      if (stage === 'connect') {
+        if (buf.length < 4) return;
+        if (buf[1] !== 0x00) return bail(new Error(`系统 SOCKS 代理拒绝连接 ${host}:${port}，code=${buf[1]}`));
+        done();
+      }
+    });
+  });
+}
+
+/** 立即性错误（前置代理没开、端口不对），值得退回直连；超时不算 */
+function isImmediateFailure(error) {
+  const code = String(error?.code || '');
+  const msg = String(error?.message || error);
+  return code === 'ECONNREFUSED'
+    || code === 'ECONNRESET'
+    || code === 'ENOENT'
+    || code === 'EADDRNOTAVAIL'
+    || /状态码/.test(msg);
+}
+
+/**
+ * 建立到上游代理服务器的原始套接字。
+ * 有系统前置代理且目标不是本机时自动借道；前置代理不可用时立刻退回直连。
+ */
+async function openRawUpstream(host, port, timeoutMs = 15000) {
+  const targetHost = String(host || '');
+  const targetPort = Number(port);
+  const isLocal = /^(127\.|localhost$|::1$|0\.0\.0\.0$)/i.test(targetHost);
+
+  if (!isLocal) {
+    const sysProxy = await detectSystemProxy();
+    const isSameEndpoint = sysProxy
+      && sysProxy.host === targetHost
+      && Number(sysProxy.port) === targetPort;
+    if (sysProxy && !isSameEndpoint) {
+      try {
+        if (sysProxy.type === 'socks5') {
+          return await viaSocksProxy(sysProxy, targetHost, targetPort, timeoutMs);
+        }
+        return await viaHttpProxy(sysProxy, targetHost, targetPort, timeoutMs);
+      } catch (error) {
+        // 前置代理没开/端口变了：退回直连，别让它变成新的故障点
+        if (!isImmediateFailure(error)) throw error;
+      }
+    }
+  }
+
+  return connectDirect(targetHost, targetPort, timeoutMs);
+}
 
 /** @type {Map<string, { server: net.Server, port: number, refs: number }>} */
 const bridges = new Map();
 
-/**
- * 同时保持的「上游 TCP 隧道」上限（住宅/隧道代理常见只有 5~10 条，超了会 SYN 超时）。
- * TikTok 会 burst 几十条连接：必须在桥里排队等槽位，而不是同时怼上游。
- * 环境变量 TKSWARM_PROXY_MAX_TUNNELS（默认 6）；排队 TKSWARM_PROXY_TUNNEL_QUEUE_MS（默认 120000）。
- */
-function readMaxActiveTunnels() {
-  const raw = Number(process.env.TKSWARM_PROXY_MAX_TUNNELS || 6);
-  if (!Number.isFinite(raw) || raw < 2) return 6;
-  return Math.min(Math.floor(raw), 64);
-}
-const MAX_ACTIVE_TUNNELS = readMaxActiveTunnels();
-const TUNNEL_QUEUE_TIMEOUT_MS = Math.max(
-  30000,
-  Number(process.env.TKSWARM_PROXY_TUNNEL_QUEUE_MS || 120000) || 120000,
-);
-let activeTunnels = 0;
-/** @type {Array<{ resolve: Function, timer: NodeJS.Timeout }>} */
-const tunnelQueue = [];
+/* ------------------------------------------------------------------ *
+ * 并发控制
+ *
+ * 住宅/隧道代理通常只允许 5~10 条并发，而 TikTok 一次要开几十条连接。
+ * 这里只限制「同时正在握手」的数量（默认 4），握手完成立刻释放槽位。
+ * 不要限制已建立的隧道数量：Chromium 会长期保持 keep-alive 连接，
+ * 按隧道数排队会让页面在等槽位时直接假死（旧实现的问题）。
+ * ------------------------------------------------------------------ */
 
-function acquireTunnelSlot(timeoutMs = TUNNEL_QUEUE_TIMEOUT_MS) {
-  if (activeTunnels < MAX_ACTIVE_TUNNELS) {
-    activeTunnels += 1;
+function readHandshakeLimit() {
+  const raw = Number(process.env.TKSWARM_PROXY_HANDSHAKE_LIMIT || 4);
+  if (!Number.isFinite(raw) || raw < 1) return 4;
+  return Math.min(Math.floor(raw), 32);
+}
+const HANDSHAKE_LIMIT = readHandshakeLimit();
+const HANDSHAKE_QUEUE_TIMEOUT_MS = Math.max(
+  5000,
+  Number(process.env.TKSWARM_PROXY_HANDSHAKE_QUEUE_MS || 30000) || 30000,
+);
+/** 软上限：只用于日志观察，不阻塞连接 */
+const MAX_ACTIVE_TUNNELS = Math.max(
+  HANDSHAKE_LIMIT,
+  Math.min(Number(process.env.TKSWARM_PROXY_MAX_TUNNELS || 64) || 64, 256),
+);
+
+let activeHandshakes = 0;
+let openTunnels = 0;
+/** @type {Array<{ resolve: Function, timer: NodeJS.Timeout }>} */
+const handshakeQueue = [];
+
+function acquireHandshakeSlot(timeoutMs = HANDSHAKE_QUEUE_TIMEOUT_MS) {
+  if (activeHandshakes < HANDSHAKE_LIMIT) {
+    activeHandshakes += 1;
     return Promise.resolve();
   }
   return new Promise((resolve, reject) => {
     const waiter = { resolve, timer: null };
     waiter.timer = setTimeout(() => {
-      const index = tunnelQueue.indexOf(waiter);
-      if (index >= 0) tunnelQueue.splice(index, 1);
-      reject(new Error(`上游隧道已满（${activeTunnels}/${MAX_ACTIVE_TUNNELS}，排队超时）`));
+      const index = handshakeQueue.indexOf(waiter);
+      if (index >= 0) handshakeQueue.splice(index, 1);
+      reject(new Error(`上游握手排队超时（${activeHandshakes}/${HANDSHAKE_LIMIT} 条正在握手）`));
     }, timeoutMs);
-    tunnelQueue.push(waiter);
+    handshakeQueue.push(waiter);
   });
 }
 
-function releaseTunnelSlot() {
-  const next = tunnelQueue.shift();
+function releaseHandshakeSlot() {
+  const next = handshakeQueue.shift();
   if (next) {
     clearTimeout(next.timer);
     next.resolve();
     return;
   }
-  activeTunnels = Math.max(0, activeTunnels - 1);
+  activeHandshakes = Math.max(0, activeHandshakes - 1);
 }
 
 function bridgeKey(profile) {
@@ -192,7 +478,7 @@ function connectUpstreamSocks5(host, port, user, pass, dest, greetAttempt = 0) {
   const greetMode = greetModes[Math.min(greetAttempt, greetModes.length - 1)];
 
   return new Promise((resolve, reject) => {
-    const sock = net.connect({ host, port: Number(port), timeout: UPSTREAM_TIMEOUT_MS });
+    let sock = null;
     let stage = 'greeting';
     let buf = Buffer.alloc(0);
     let settled = false;
@@ -200,7 +486,7 @@ function connectUpstreamSocks5(host, port, user, pass, dest, greetAttempt = 0) {
     const fail = (err) => {
       if (settled) return;
       settled = true;
-      try { sock.destroy(); } catch { /* */ }
+      try { sock?.destroy(); } catch { /* */ }
       reject(err instanceof Error ? err : new Error(String(err)));
     };
 
@@ -211,7 +497,7 @@ function connectUpstreamSocks5(host, port, user, pass, dest, greetAttempt = 0) {
           : 'SOCKS5 需要账密认证（环境里未配置代理用户名/密码）'));
       }
       settled = true;
-      try { sock.destroy(); } catch { /* */ }
+      try { sock?.destroy(); } catch { /* */ }
       connectUpstreamSocks5(host, port, user, pass, dest, greetAttempt + 1).then(resolve).catch(reject);
     };
 
@@ -226,65 +512,66 @@ function connectUpstreamSocks5(host, port, user, pass, dest, greetAttempt = 0) {
       resolve(upstream);
     };
 
-    sock.on('error', fail);
-    sock.on('timeout', () => fail(new Error('上游 SOCKS 连接超时')));
-    sock.on('data', (chunk) => {
-      buf = Buffer.concat([buf, chunk]);
-      if (stage === 'greeting') {
-        if (buf.length < 2) return;
-        if (buf[0] !== 0x05) return fail(new Error('上游不是 SOCKS5'));
-        const method = buf[1];
-        if (method === 0xFF) return retryGreeting();
-        buf = buf.slice(2);
-        if (method === 0x02) {
-          stage = 'auth';
-          sock.write(packSocksAuth(user, pass));
-          return;
+    openRawUpstream(host, port, UPSTREAM_TIMEOUT_MS).then((rawSocket) => {
+      sock = rawSocket;
+      sock.on('error', fail);
+      sock.on('timeout', () => fail(new Error('上游 SOCKS 连接超时')));
+      sock.on('data', (chunk) => {
+        buf = Buffer.concat([buf, chunk]);
+        if (stage === 'greeting') {
+          if (buf.length < 2) return;
+          if (buf[0] !== 0x05) return fail(new Error('上游不是 SOCKS5'));
+          const method = buf[1];
+          if (method === 0xFF) return retryGreeting();
+          buf = buf.slice(2);
+          if (method === 0x02) {
+            stage = 'auth';
+            sock.write(packSocksAuth(user, pass));
+            return;
+          }
+          if (method === 0x00) {
+            stage = 'request';
+            sock.write(buildSocks5ConnectBuf(dest));
+            return;
+          }
+          return fail(new Error(`SOCKS5 不支持的认证方法: ${method}`));
         }
-        if (method === 0x00) {
+        if (stage === 'auth') {
+          if (buf.length < 2) return;
+          if (buf[0] !== 0x01 || buf[1] !== 0x00) {
+            return fail(new Error('SOCKS5 用户名/密码认证失败'));
+          }
+          buf = buf.slice(2);
           stage = 'request';
           sock.write(buildSocks5ConnectBuf(dest));
           return;
         }
-        return fail(new Error(`SOCKS5 不支持的认证方法: ${method}`));
-      }
-      if (stage === 'auth') {
-        if (buf.length < 2) return;
-        if (buf[0] !== 0x01 || buf[1] !== 0x00) {
-          return fail(new Error('SOCKS5 用户名/密码认证失败'));
+        if (stage === 'request') {
+          if (buf.length < 4) return;
+          if (buf[1] !== 0x00) return fail(new Error(`SOCKS5 连接失败 code=${buf[1]}`));
+          let need = 4;
+          const atyp = buf[3];
+          if (atyp === 0x01) need += 4 + 2;
+          else if (atyp === 0x03) {
+            if (buf.length < 5) return;
+            need += 1 + buf[4] + 2;
+          } else if (atyp === 0x04) need += 16 + 2;
+          else return fail(new Error('SOCKS5 不支持地址类型'));
+          if (buf.length < need) return;
+          sock.removeAllListeners('data');
+          succeed(sock);
         }
-        buf = buf.slice(2);
-        stage = 'request';
-        sock.write(buildSocks5ConnectBuf(dest));
-        return;
-      }
-      if (stage === 'request') {
-        if (buf.length < 4) return;
-        if (buf[1] !== 0x00) return fail(new Error(`SOCKS5 连接失败 code=${buf[1]}`));
-        let need = 4;
-        const atyp = buf[3];
-        if (atyp === 0x01) need += 4 + 2;
-        else if (atyp === 0x03) {
-          if (buf.length < 5) return;
-          need += 1 + buf[4] + 2;
-        } else if (atyp === 0x04) need += 16 + 2;
-        else return fail(new Error('SOCKS5 不支持地址类型'));
-        if (buf.length < need) return;
-        sock.removeAllListeners('data');
-        succeed(sock);
-      }
-    });
+      });
 
-    sock.on('connect', () => {
       sock.write(socksGreetingPacket(greetMode));
-    });
+    }).catch(fail);
   });
 }
 
 function connectUpstreamHttp(host, port, user, pass, destHost, destPort) {
   return new Promise((resolve, reject) => {
+    let sock = null;
     const hasAuth = Boolean(String(user || '').trim() || String(pass || '').trim());
-    const sock = net.connect({ host, port: Number(port), timeout: UPSTREAM_TIMEOUT_MS });
     const lines = [
       `CONNECT ${destHost}:${destPort} HTTP/1.1`,
       `Host: ${destHost}:${destPort}`,
@@ -301,7 +588,7 @@ function connectUpstreamHttp(host, port, user, pass, destHost, destPort) {
     const fail = (err) => {
       if (settled) return;
       settled = true;
-      try { sock.destroy(); } catch { /* */ }
+      try { sock?.destroy(); } catch { /* */ }
       reject(err instanceof Error ? err : new Error(String(err)));
     };
     const succeed = (upstream) => {
@@ -315,20 +602,23 @@ function connectUpstreamHttp(host, port, user, pass, destHost, destPort) {
       resolve(upstream);
     };
 
-    sock.on('error', fail);
-    sock.on('timeout', () => fail(new Error('上游 HTTP 代理连接超时')));
-    sock.on('data', (chunk) => {
-      buf += chunk.toString('binary');
-      const idx = buf.indexOf('\r\n\r\n');
-      if (idx < 0) return;
-      const head = buf.slice(0, idx);
-      if (!/^HTTP\/1\.\d 200/i.test(head)) {
-        return fail(new Error(`HTTP 代理 CONNECT 失败: ${head.split('\r\n')[0]}`));
-      }
-      sock.removeAllListeners('data');
-      succeed(sock);
-    });
-    sock.on('connect', () => sock.write(req));
+    openRawUpstream(host, port, UPSTREAM_TIMEOUT_MS).then((rawSocket) => {
+      sock = rawSocket;
+      sock.on('error', fail);
+      sock.on('timeout', () => fail(new Error('上游 HTTP 代理连接超时')));
+      sock.on('data', (chunk) => {
+        buf += chunk.toString('binary');
+        const idx = buf.indexOf('\r\n\r\n');
+        if (idx < 0) return;
+        const head = buf.slice(0, idx);
+        if (!/^HTTP\/1\.\d 200/i.test(head)) {
+          return fail(new Error(`HTTP 代理 CONNECT 失败: ${head.split('\r\n')[0]}`));
+        }
+        sock.removeAllListeners('data');
+        succeed(sock);
+      });
+      sock.write(req);
+    }).catch(fail);
   });
 }
 
@@ -395,37 +685,34 @@ function handleSocksClient(client, profile, onError, onLog) {
     destroyBoth();
   };
 
-  const startTunnel = (up, leftover, dest, releaseTunnel) => {
+  const startTunnel = (up, leftover, dest) => {
     upstream = up;
-    let tunnelReleased = false;
-    const releaseOnce = () => {
-      if (tunnelReleased) return;
-      tunnelReleased = true;
-      if (typeof releaseTunnel === 'function') releaseTunnel();
-    };
     client.write(Buffer.from([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
     if (leftover.length) up.write(leftover);
     for (const pending of clientPending) up.write(pending);
     clientPending.length = 0;
     stage = 'tunnel';
-    log(`隧道建立 → ${dest?.host || '?'}:${dest?.port || 0}（活跃 ${activeTunnels}/${MAX_ACTIVE_TUNNELS}）`);
+    openTunnels += 1;
+    log(`隧道建立 → ${dest?.host || '?'}:${dest?.port || 0}（当前 ${openTunnels} 条隧道）`);
+    let counted = true;
+    const closeOnce = () => {
+      if (!counted) return;
+      counted = false;
+      openTunnels = Math.max(0, openTunnels - 1);
+    };
     up.on('error', (error) => {
       log(`隧道上游错误: ${error?.message || error}`);
-      releaseOnce();
       destroyBoth();
     });
-    client.on('error', () => {
-      releaseOnce();
-      destroyBoth();
-    });
+    client.on('error', () => destroyBoth());
     client.on('close', () => {
       log(`客户端关闭（上行 ${tunnelUp}B / 下行 ${tunnelDown}B）`);
-      releaseOnce();
+      closeOnce();
       try { up.destroy(); } catch { /* */ }
     });
     up.on('close', () => {
       log(`上游关闭（上行 ${tunnelUp}B / 下行 ${tunnelDown}B）`);
-      releaseOnce();
+      closeOnce();
       try { client.destroy(); } catch { /* */ }
     });
     // 只走 pipe 转发；曾经同时在 data 事件里写一次，导致同一份字节发两遍，TLS 握手必然失败
@@ -485,21 +772,23 @@ function handleSocksClient(client, profile, onError, onLog) {
         return new Promise((done) => setTimeout(done, 300 * n)).then(() => attempt(n + 1));
       });
 
+      // 只限制「同时正在握手」的条数，握手完成立刻释放，不会堵住已建立的隧道
       let releaseSlot = () => {};
-      void acquireTunnelSlot()
+      void acquireHandshakeSlot()
         .then(() => {
           let held = true;
           releaseSlot = () => {
             if (!held) return;
             held = false;
-            releaseTunnelSlot();
+            releaseHandshakeSlot();
           };
           if (client.destroyed) throw new Error('客户端已断开');
           return attempt(1);
         })
         .then((up) => {
+          releaseSlot();
           client.resume();
-          startTunnel(up, leftover, dest, releaseSlot);
+          startTunnel(up, leftover, dest);
         })
         .catch((error) => {
           releaseSlot();
@@ -580,12 +869,35 @@ async function resolveChromeProxy(profile, opts = {}) {
   };
 }
 
+/**
+ * 与本地桥相同的上游 SOCKS5 握手（供自检/探测复用，避免两套实现结果不一致）
+ */
+async function probeUpstreamSocks5(upHost, upPort, user, pass, destHost, destPort) {
+  const dest = { host: String(destHost), port: Number(destPort) || 443 };
+  const sock = await connectUpstreamSocks5(upHost, upPort, user, pass, dest);
+  try { sock.destroy(); } catch { /* */ }
+  return true;
+}
+
+/** 一句话描述当前链路（给日志和诊断页用） */
+async function describeUpstreamRoute() {
+  const sysProxy = await detectSystemProxy();
+  if (!sysProxy) return '直连上游代理（未检测到系统前置代理）';
+  return `经系统前置代理 ${sysProxy.type}://${sysProxy.host}:${sysProxy.port} → 上游代理`;
+}
+
 module.exports = {
   resolveChromeProxy,
   needsAuthBridge,
   releaseBridge,
   bridges,
   formatProxyRules,
+  probeUpstreamSocks5,
+  connectUpstreamSocks5,
+  detectSystemProxy,
+  describeUpstreamRoute,
   PROXY_BRIDGE_REV,
   MAX_ACTIVE_TUNNELS,
+  HANDSHAKE_LIMIT,
+  get openTunnels() { return openTunnels; },
 };

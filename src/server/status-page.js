@@ -11,6 +11,7 @@
 const express = require('express');
 const { DATA_ROOT, API_HOST, API_PORT } = require('../config');
 const { probeDest, probeBurst } = require('../browser/proxy-probe');
+const { describeUpstreamRoute } = require('../browser/proxy-auth');
 
 function appVersion() {
   try {
@@ -136,22 +137,22 @@ function buildRouter() {
 
     let html = '';
     try {
-      const [tiktok, neutral] = await Promise.all([
-        probeDest({ host: meta.proxy_host, port: meta.proxy_port, user: meta.proxy_user, pass: meta.proxy_pass, destHost: 'www.tiktok.com', destPort: 443, timeoutMs: 7000 }),
-        probeDest({ host: meta.proxy_host, port: meta.proxy_port, user: meta.proxy_user, pass: meta.proxy_pass, destHost: 'www.gstatic.com', destPort: 443, timeoutMs: 7000 }),
-      ]);
-      const burst = await probeBurst(meta, { count: 5, destHost: 'www.tiktok.com', timeoutMs: 7000 });
+      const neutral = await probeDest({ host: meta.proxy_host, port: meta.proxy_port, user: meta.proxy_user, pass: meta.proxy_pass, destHost: 'www.gstatic.com', destPort: 443, timeoutMs: 5000 });
+      const tiktok = await probeDest({ host: meta.proxy_host, port: meta.proxy_port, user: meta.proxy_user, pass: meta.proxy_pass, destHost: 'www.tiktok.com', destPort: 443, timeoutMs: 5000 });
+      const burst = await probeBurst(meta, { count: 3, destHost: 'www.tiktok.com', timeoutMs: 5000, sequential: true, gapMs: 200 });
 
       const mark = (r) => (r.ok ? '<span class="ok">通</span>' : '<span class="bad">不通</span>');
+      const route = await describeUpstreamRoute().catch(() => '未知');
       const rows = [
+        ['上游链路', esc(route)],
         ['代理', esc(`${meta.proxy_type}://${meta.proxy_host}:${meta.proxy_port}${meta.proxy_user ? '（含账密）' : '（无账密）'}`)],
         ['到 TikTok', `${mark(tiktok)} ${esc(tiktok.message)}（${tiktok.ms}ms）`],
         ['到中性站', `${mark(neutral)} ${esc(neutral.message)}（${neutral.ms}ms）`],
-        ['并发 5 条', `${burst.ok === 5 ? '<span class="ok">' : burst.ok === 0 ? '<span class="bad">' : '<span class="warn">'}${burst.ok}/5 成功</span>`],
+        ['顺序 3 条', `${burst.ok === 3 ? '<span class="ok">' : burst.ok === 0 ? '<span class="bad">' : '<span class="warn">'}${burst.ok}/3 成功</span>`],
       ].map(([k, v]) => `<tr><th>${k}</th><td>${v}</td></tr>`).join('');
 
       let verdict;
-      if (tiktok.ok && burst.ok >= 4) {
+      if (tiktok.ok && burst.ok >= 2) {
         verdict = '<p class="tip ok">这台机器用这个代理没问题。若自研浏览器还连不上，把 data/logs/env-*.log 发我。</p>';
       } else if (neutral.ok && !tiktok.ok) {
         verdict = '<p class="tip bad">代理能出网，但 TikTok 被代理侧拦了（换支持 TikTok 的节点）。</p>';
@@ -196,7 +197,7 @@ function buildRouter() {
         pass: meta.proxy_pass,
         destHost: 'www.tiktok.com',
         destPort: 443,
-        timeoutMs: 7000,
+        timeoutMs: 5000,
       });
       return { line, ok: r.ok, message: `${r.message}（${r.ms}ms）` };
     });

@@ -9,12 +9,16 @@ const { execSync } = require('node:child_process');
 
 const root = path.resolve(__dirname, '..');
 const asar = path.join(root, 'dist', 'win-unpacked', 'resources', 'app.asar');
-const portable = fs.readdirSync(path.join(root, 'dist')).find((n) => /-win-portable\.exe$/i.test(n));
 
 if (!fs.existsSync(asar)) {
   console.error('未找到 dist/win-unpacked/resources/app.asar，请先执行: npm run dist:win');
   process.exit(1);
 }
+
+const distDir = path.join(root, 'dist');
+const portable = fs.existsSync(distDir)
+  ? fs.readdirSync(distDir).find((n) => /-win-portable\.exe$/i.test(n))
+  : null;
 
 const tmp = path.join(require('node:os').tmpdir(), `tkswarm-asar-verify-${Date.now()}`);
 fs.mkdirSync(tmp, { recursive: true });
@@ -29,8 +33,10 @@ const proxyAuth = path.join(tmp, 'src', 'browser', 'proxy-auth.js');
 const text = fs.readFileSync(proxyAuth, 'utf8');
 const checks = [
   ['handleSocksClient', /function handleSocksClient/],
-  ['PROXY_BRIDGE_REV', /PROXY_BRIDGE_REV\s*=\s*['"]8['"]/],
-  ['tunnel slot queue', /acquireTunnelSlot/],
+  ['PROXY_BRIDGE_REV', /PROXY_BRIDGE_REV\s*=\s*['"]10['"]/],
+  ['系统前置代理探测', /detectSystemProxy/],
+  ['上游借道系统代理', /openRawUpstream/],
+  ['handshake slot queue', /acquireHandshakeSlot/],
   ['max tunnels config', /MAX_ACTIVE_TUNNELS/],
   ['socks5:// local rules', /socks5:\/\/127\.0\.0\.1/],
   ['no stale proxy.proxyArg in launcher', () => {
