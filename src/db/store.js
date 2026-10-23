@@ -132,10 +132,16 @@ function updateProfileProxy(id, proxy) {
     const p = data.profiles.find((x) => x.id === String(id));
     if (!p) return null;
     p.proxy_type = proxy.proxyType || 'noproxy';
-    p.proxy_host = proxy.host || '';
-    p.proxy_port = Number(proxy.port || 0);
-    p.proxy_user = proxy.proxyUserName || '';
-    p.proxy_pass = proxy.proxyPassword || '';
+    const nextHost = proxy.host || '';
+    const nextPort = Number(proxy.port || 0);
+    const sameEndpoint = nextHost === (p.proxy_host || '') && nextPort === Number(p.proxy_port || 0);
+    const nextUser = String(proxy.proxyUserName || '').trim();
+    const nextPass = String(proxy.proxyPassword || '');
+    p.proxy_host = nextHost;
+    p.proxy_port = nextPort;
+    // Node 偶发只同步 host/port、不带账密时，勿把库里已有密码清空（否则桥接变直连 → ERR_SOCKS）
+    p.proxy_user = nextUser || (sameEndpoint ? (p.proxy_user || '') : '');
+    p.proxy_pass = nextPass || (sameEndpoint ? (p.proxy_pass || '') : '');
     if (proxy.lastIp != null) p.last_ip = String(proxy.lastIp || '');
     if (proxy.timezone) p.timezone = String(proxy.timezone);
     if (proxy.language) p.language = String(proxy.language);

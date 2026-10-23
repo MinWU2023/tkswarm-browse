@@ -6,47 +6,54 @@
 const net = require('node:net');
 
 /** 代理桥实现版本（发版后对照 env 日志，避免误用旧 dist/ 或未下载的新 Release） */
-const PROXY_BRIDGE_REV = '6';
+const PROXY_BRIDGE_REV = '8';
 
 /** @type {Map<string, { server: net.Server, port: number, refs: number }>} */
 const bridges = new Map();
 
 /**
- * 同时向上游发起 **握手** 的并发上限（隧道建立后立即释放槽位）。
- * 住宅代理对「新建连接」敏感，握手阶段排队可避免 SYN 风暴；但不能把槽位占满整条隧道，
- * 否则 TikTok 首页几十条长连接会把槽占死，其余连接排队超时 → 大面积代理失败页。
+ * 同时保持的「上游 TCP 隧道」上限（住宅/隧道代理常见只有 5~10 条，超了会 SYN 超时）。
+ * TikTok 会 burst 几十条连接：必须在桥里排队等槽位，而不是同时怼上游。
+ * 环境变量 TKSWARM_PROXY_MAX_TUNNELS（默认 6）；排队 TKSWARM_PROXY_TUNNEL_QUEUE_MS（默认 120000）。
  */
-const MAX_UPSTREAM_CONCURRENCY = 32;
-const UPSTREAM_QUEUE_TIMEOUT_MS = 20000;
-let upstreamActive = 0;
-/** @type {Array<{ resolve: Function, timer: any }>} */
-const upstreamQueue = [];
+function readMaxActiveTunnels() {
+  const raw = Number(process.env.TKSWARM_PROXY_MAX_TUNNELS || 6);
+  if (!Number.isFinite(raw) || raw < 2) return 6;
+  return Math.min(Math.floor(raw), 64);
+}
+const MAX_ACTIVE_TUNNELS = readMaxActiveTunnels();
+const TUNNEL_QUEUE_TIMEOUT_MS = Math.max(
+  30000,
+  Number(process.env.TKSWARM_PROXY_TUNNEL_QUEUE_MS || 120000) || 120000,
+);
+let activeTunnels = 0;
+/** @type {Array<{ resolve: Function, timer: NodeJS.Timeout }>} */
+const tunnelQueue = [];
 
-function acquireUpstreamSlot(timeoutMs = UPSTREAM_QUEUE_TIMEOUT_MS) {
-  if (upstreamActive < MAX_UPSTREAM_CONCURRENCY) {
-    upstreamActive += 1;
+function acquireTunnelSlot(timeoutMs = TUNNEL_QUEUE_TIMEOUT_MS) {
+  if (activeTunnels < MAX_ACTIVE_TUNNELS) {
+    activeTunnels += 1;
     return Promise.resolve();
   }
   return new Promise((resolve, reject) => {
     const waiter = { resolve, timer: null };
     waiter.timer = setTimeout(() => {
-      const index = upstreamQueue.indexOf(waiter);
-      if (index >= 0) upstreamQueue.splice(index, 1);
-      reject(new Error('上游并发已满（排队超时）'));
+      const index = tunnelQueue.indexOf(waiter);
+      if (index >= 0) tunnelQueue.splice(index, 1);
+      reject(new Error(`上游隧道已满（${activeTunnels}/${MAX_ACTIVE_TUNNELS}，排队超时）`));
     }, timeoutMs);
-    upstreamQueue.push(waiter);
+    tunnelQueue.push(waiter);
   });
 }
 
-function releaseUpstreamSlot() {
-  const next = upstreamQueue.shift();
+function releaseTunnelSlot() {
+  const next = tunnelQueue.shift();
   if (next) {
-    // 槽位直接转交给排队的人，占用总数不变
     clearTimeout(next.timer);
     next.resolve();
     return;
   }
-  upstreamActive = Math.max(0, upstreamActive - 1);
+  activeTunnels = Math.max(0, activeTunnels - 1);
 }
 
 function bridgeKey(profile) {
@@ -173,9 +180,18 @@ const UPSTREAM_TIMEOUT_MS = 9000;
 /** 上游连接重试次数（含首次） */
 const UPSTREAM_ATTEMPTS = 3;
 
-function connectUpstreamSocks5(host, port, user, pass, dest) {
+function socksGreetingPacket(mode) {
+  if (mode === 'auth-only') return Buffer.from([0x05, 0x01, 0x02]);
+  if (mode === 'both') return Buffer.from([0x05, 0x02, 0x00, 0x02]);
+  return Buffer.from([0x05, 0x01, 0x00]);
+}
+
+function connectUpstreamSocks5(host, port, user, pass, dest, greetAttempt = 0) {
+  const hasAuth = Boolean(String(user || '').trim() || String(pass || '').trim());
+  const greetModes = hasAuth ? ['auth-only', 'both', 'no-auth-only'] : ['no-auth-only', 'both'];
+  const greetMode = greetModes[Math.min(greetAttempt, greetModes.length - 1)];
+
   return new Promise((resolve, reject) => {
-    const hasAuth = Boolean(String(user || '').trim() || String(pass || '').trim());
     const sock = net.connect({ host, port: Number(port), timeout: UPSTREAM_TIMEOUT_MS });
     let stage = 'greeting';
     let buf = Buffer.alloc(0);
@@ -188,10 +204,25 @@ function connectUpstreamSocks5(host, port, user, pass, dest) {
       reject(err instanceof Error ? err : new Error(String(err)));
     };
 
+    const retryGreeting = () => {
+      if (greetAttempt + 1 >= greetModes.length) {
+        return fail(new Error(hasAuth
+          ? 'SOCKS5 拒绝认证（账密错误或代理不支持该认证方式）'
+          : 'SOCKS5 需要账密认证（环境里未配置代理用户名/密码）'));
+      }
+      settled = true;
+      try { sock.destroy(); } catch { /* */ }
+      connectUpstreamSocks5(host, port, user, pass, dest, greetAttempt + 1).then(resolve).catch(reject);
+    };
+
     const succeed = (upstream) => {
       if (settled) return;
       settled = true;
       sock.setTimeout(0);
+      try {
+        sock.setKeepAlive(true, 15000);
+        sock.setNoDelay(true);
+      } catch { /* */ }
       resolve(upstream);
     };
 
@@ -203,7 +234,7 @@ function connectUpstreamSocks5(host, port, user, pass, dest) {
         if (buf.length < 2) return;
         if (buf[0] !== 0x05) return fail(new Error('上游不是 SOCKS5'));
         const method = buf[1];
-        if (method === 0xFF) return fail(new Error('SOCKS5 拒绝认证方式'));
+        if (method === 0xFF) return retryGreeting();
         buf = buf.slice(2);
         if (method === 0x02) {
           stage = 'auth';
@@ -245,12 +276,7 @@ function connectUpstreamSocks5(host, port, user, pass, dest) {
     });
 
     sock.on('connect', () => {
-      // 与 Node 探测一致：有账密时同时提供无认证 + 用户名密码
-      if (hasAuth) {
-        sock.write(Buffer.from([0x05, 0x02, 0x00, 0x02]));
-      } else {
-        sock.write(Buffer.from([0x05, 0x01, 0x00]));
-      }
+      sock.write(socksGreetingPacket(greetMode));
     });
   });
 }
@@ -282,6 +308,10 @@ function connectUpstreamHttp(host, port, user, pass, destHost, destPort) {
       if (settled) return;
       settled = true;
       sock.setTimeout(0);
+      try {
+        sock.setKeepAlive(true, 15000);
+        sock.setNoDelay(true);
+      } catch { /* */ }
       resolve(upstream);
     };
 
@@ -365,25 +395,37 @@ function handleSocksClient(client, profile, onError, onLog) {
     destroyBoth();
   };
 
-  const startTunnel = (up, leftover, dest) => {
+  const startTunnel = (up, leftover, dest, releaseTunnel) => {
     upstream = up;
+    let tunnelReleased = false;
+    const releaseOnce = () => {
+      if (tunnelReleased) return;
+      tunnelReleased = true;
+      if (typeof releaseTunnel === 'function') releaseTunnel();
+    };
     client.write(Buffer.from([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
     if (leftover.length) up.write(leftover);
     for (const pending of clientPending) up.write(pending);
     clientPending.length = 0;
     stage = 'tunnel';
-    log(`隧道建立 → ${dest?.host || '?'}:${dest?.port || 0}`);
+    log(`隧道建立 → ${dest?.host || '?'}:${dest?.port || 0}（活跃 ${activeTunnels}/${MAX_ACTIVE_TUNNELS}）`);
     up.on('error', (error) => {
       log(`隧道上游错误: ${error?.message || error}`);
+      releaseOnce();
       destroyBoth();
     });
-    client.on('error', () => destroyBoth());
+    client.on('error', () => {
+      releaseOnce();
+      destroyBoth();
+    });
     client.on('close', () => {
       log(`客户端关闭（上行 ${tunnelUp}B / 下行 ${tunnelDown}B）`);
+      releaseOnce();
       try { up.destroy(); } catch { /* */ }
     });
     up.on('close', () => {
       log(`上游关闭（上行 ${tunnelUp}B / 下行 ${tunnelDown}B）`);
+      releaseOnce();
       try { client.destroy(); } catch { /* */ }
     });
     // 只走 pipe 转发；曾经同时在 data 事件里写一次，导致同一份字节发两遍，TLS 握手必然失败
@@ -444,21 +486,20 @@ function handleSocksClient(client, profile, onError, onLog) {
       });
 
       let releaseSlot = () => {};
-      void acquireUpstreamSlot()
+      void acquireTunnelSlot()
         .then(() => {
           let held = true;
           releaseSlot = () => {
             if (!held) return;
             held = false;
-            releaseUpstreamSlot();
+            releaseTunnelSlot();
           };
           if (client.destroyed) throw new Error('客户端已断开');
           return attempt(1);
         })
         .then((up) => {
-          releaseSlot();
           client.resume();
-          startTunnel(up, leftover, dest);
+          startTunnel(up, leftover, dest, releaseSlot);
         })
         .catch((error) => {
           releaseSlot();
@@ -546,4 +587,5 @@ module.exports = {
   bridges,
   formatProxyRules,
   PROXY_BRIDGE_REV,
+  MAX_ACTIVE_TUNNELS,
 };

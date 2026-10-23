@@ -16,8 +16,8 @@
  */
 const { app, session } = require('electron');
 const { createEnvChrome } = require('./env-chrome');
-const { resolveChromeProxy, PROXY_BRIDGE_REV } = require('./proxy-auth');
-const { probeProxySummary } = require('./proxy-probe');
+const { resolveChromeProxy, PROXY_BRIDGE_REV, MAX_ACTIVE_TUNNELS } = require('./proxy-auth');
+const { probeProxySummary, probeBurst } = require('./proxy-probe');
 const { showDiagnosticOnWebContents, inspectBlankContentOnWc } = require('./env-window-ui');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -208,6 +208,7 @@ function showDiagnostic(browserWindow, opts) {
 
 function bindContentWatchers(webContents, proxyDisplay) {
   if (!webContents) return;
+  let pageLoadedOk = false;
   const diagOpts = {
     url: targetUrl,
     proxy: proxyDisplay || '直连（未绑定代理）',
@@ -222,6 +223,10 @@ function bindContentWatchers(webContents, proxyDisplay) {
     if (!validatedURL || validatedURL.startsWith('data:') || validatedURL.startsWith('file:')) return;
     if (validatedURL === 'about:blank') return;
     logLine(`did-fail-load code=${errorCode} desc=${errorDescription} url=${validatedURL}`);
+    if (pageLoadedOk) {
+      logLine('页面此前已成功加载，本次导航失败不切换诊断页（可手动刷新或检查代理并发）');
+      return;
+    }
     if (settled) return;
     settled = true;
     showDiagnosticOnWebContents(webContents, profileId, {
@@ -259,6 +264,7 @@ function bindContentWatchers(webContents, proxyDisplay) {
   webContents.on('did-finish-load', () => {
     const href = webContents.getURL();
     if (href.startsWith('data:') || href.startsWith('file:')) return;
+    pageLoadedOk = true;
     clearTimeout(hardTimeout);
     if (inspected || settled) return;
     inspected = true;
@@ -270,7 +276,7 @@ function bindContentWatchers(webContents, proxyDisplay) {
 
 /* ---------------- 启动 ---------------- */
 app.whenReady().then(async () => {
-  logLine(`启动环境窗口 v${app.getVersion()} profile=${profileId} headless=${cfg.headless ? 1 : 0} target=${targetUrl} PROXY_BRIDGE_REV=${PROXY_BRIDGE_REV}`);
+  logLine(`启动环境窗口 v${app.getVersion()} profile=${profileId} headless=${cfg.headless ? 1 : 0} target=${targetUrl} PROXY_BRIDGE_REV=${PROXY_BRIDGE_REV} PROXY_MAX_TUNNELS=${MAX_ACTIVE_TUNNELS}`);
 
   const ses = session.defaultSession;
   if (cfg.userAgent) {
@@ -280,8 +286,8 @@ app.whenReady().then(async () => {
   }
   let proxyRules = String(cfg.proxyServer || '').trim();
   if (cfg.proxyMeta && cfg.proxyMeta.proxy_host) {
-    if (!cfg.proxyMeta.proxy_user && !cfg.proxyMeta.proxy_pass) {
-      logLine('警告：环境代理未配置账密；若上游 SOCKS 需要认证，将直连失败（请确认 Node 同步了 proxy_username/proxy_password）');
+    if (!cfg.proxyMeta.proxy_user || !cfg.proxyMeta.proxy_pass) {
+      logLine(`警告：环境代理账密不完整（user=${cfg.proxyMeta.proxy_user ? '有' : '无'} pass=${cfg.proxyMeta.proxy_pass ? '有' : '无'}）；需要认证的 SOCKS 将握手失败`);
     }
     try {
       const local = await resolveChromeProxy(cfg.proxyMeta, {
@@ -294,7 +300,7 @@ app.whenReady().then(async () => {
       releaseProxy = local.release || (() => {});
       proxyRules = local.proxyRules || String(local.proxyArg || '').replace(/^--proxy-server=/, '');
       if (proxyRules) {
-        const authHint = cfg.proxyMeta.proxy_user ? '（含账密）' : '（无账密）';
+        const authHint = (cfg.proxyMeta.proxy_user && cfg.proxyMeta.proxy_pass) ? '（含账密）' : '（账密不完整）';
         const viaBridge = local.localPort ? '本地桥' : '直连上游';
         logLine(`子进程代理已就绪（${viaBridge}）: ${proxyRules} → 上游 ${cfg.proxyMeta.proxy_type}://${cfg.proxyMeta.proxy_host}:${cfg.proxyMeta.proxy_port}${authHint}`);
       }
@@ -333,8 +339,15 @@ app.whenReady().then(async () => {
   });
 
   const contentWc = chrome.getActiveWebContents();
+  const bridgeHint = (() => {
+    if (!cfg.proxyMeta?.proxy_host) return '';
+    const isLocalBridge = /^socks5:\/\/127\.0\.0\.1:\d+$/i.test(String(proxyRules || ''));
+    if (isLocalBridge) return `（本地桥 ${proxyRules}）`;
+    if (cfg.proxyMeta.proxy_user || cfg.proxyMeta.proxy_pass) return '（直连上游，账密应由本地桥转发）';
+    return '（直连上游，无账密）';
+  })();
   const proxyDisplay = cfg.proxyMeta?.proxy_host
-    ? `上游 ${cfg.proxyMeta.proxy_type}://${cfg.proxyMeta.proxy_host}:${cfg.proxyMeta.proxy_port}${proxyRules ? `（子进程桥 ${proxyRules}）` : ''}`
+    ? `上游 ${cfg.proxyMeta.proxy_type}://${cfg.proxyMeta.proxy_host}:${cfg.proxyMeta.proxy_port}${bridgeHint}`
     : (proxyRules || cfg.proxyServer || '直连（未绑定代理）');
   bindContentWatchers(contentWc, proxyDisplay);
   contentWc?.on('unresponsive', () => logLine('窗口无响应（unresponsive）'));
@@ -344,7 +357,14 @@ app.whenReady().then(async () => {
   // 上游代理自检：与开窗并行，不拖慢打开速度；结果写日志，并在诊断页补上结论
   if (cfg.proxyMeta?.proxy_host) {
     void probeProxySummary(cfg.proxyMeta, { timeoutMs: 7000 })
-      .then((text) => {
+      .then(async (text) => {
+        try {
+          const burst = await probeBurst(cfg.proxyMeta, { count: 6, timeoutMs: 8000 });
+          const hint = burst.ok > 0
+            ? `；并发探测 ${burst.ok}/${burst.count} 条同时成功（代理套餐并发约 ${burst.ok}，可设 TKSWARM_PROXY_MAX_TUNNELS=${Math.max(2, burst.ok)}）`
+            : `；并发探测 0/${burst.count}（代理可能暂不可用或并发极低）`;
+          text = `${text}${hint}`;
+        } catch { /* */ }
         proxyProbeText = text;
         logLine(`代理自检: ${text}`);
         try {

@@ -1,4 +1,5 @@
-const { app, BrowserWindow, Tray, Menu, nativeImage } = require('electron');
+const { app, BrowserWindow, Tray, Menu } = require('electron');
+const { loadAppIcon, applyWindowIcon } = require('../src/browser/app-icon');
 const path = require('node:path');
 const { bootstrapRenderFlags, wantSoftwareRender } = require('../src/browser/render-flags');
 const { applyChromiumArgvToApp } = require('../src/browser/chromium-argv');
@@ -38,8 +39,10 @@ pre{background:#fff;border:1px solid #ecdac7;border-radius:12px;padding:16px;ove
         height: 640,
         backgroundColor: '#fdf7f0',
         title: '环境窗口启动失败',
+        icon: loadAppIcon() || undefined,
         webPreferences: { contextIsolation: true, nodeIntegration: false },
       });
+      applyWindowIcon(win);
       const file = pathMod.join(os.tmpdir(), `tkswarm-env-boot-error-${process.pid}.html`);
       try {
         fs.writeFileSync(file, html, 'utf8');
@@ -93,18 +96,21 @@ if (IS_ENV_PROCESS) {
   }
 
   function createWindow() {
+    const appIcon = loadAppIcon();
     mainWindow = new BrowserWindow({
       width: 1180,
       height: 760,
       minWidth: 960,
       minHeight: 600,
       title: '第一页自研浏览器',
+      icon: appIcon || undefined,
       webPreferences: {
         preload: path.join(__dirname, 'preload.js'),
         contextIsolation: true,
         nodeIntegration: false,
       },
     });
+    applyWindowIcon(mainWindow);
 
     mainWindow.loadFile(path.join(__dirname, '../ui/index.html'));
     if (isDev) mainWindow.webContents.openDevTools({ mode: 'detach' });
@@ -115,7 +121,8 @@ if (IS_ENV_PROCESS) {
   }
 
   function createTray() {
-    const icon = nativeImage.createEmpty();
+    const icon = loadAppIcon();
+    if (!icon) return;
     tray = new Tray(icon);
     tray.setToolTip('第一页自研浏览器');
     tray.setContextMenu(Menu.buildFromTemplate([

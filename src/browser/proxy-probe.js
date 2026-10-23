@@ -95,7 +95,7 @@ function probeDest({ host, port, user, pass, destHost, destPort, timeoutMs = 700
 
     sock.on('connect', () => {
       stage = 'greeting';
-      sock.write(hasAuth ? Buffer.from([0x05, 0x02, 0x00, 0x02]) : Buffer.from([0x05, 0x01, 0x00]));
+      sock.write(hasAuth ? Buffer.from([0x05, 0x01, 0x02]) : Buffer.from([0x05, 0x01, 0x00]));
     });
 
     sock.on('data', (chunk) => {

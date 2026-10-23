@@ -88,6 +88,7 @@ async function launchProfileElectron(profile, options = {}) {
   const locale = profile.language || fp.languages || 'en-US';
   const port = await getFreePort();
   const userDataDir = profileDir(profile.id);
+  const logFile = envLogFile(profile.id);
   // 代理桥必须在环境子进程内启动（父进程桥子进程连不上；Electron setProxy 直连上游 SOCKS 也不稳定）
   let proxyMeta = null;
   if (profile.proxy_type && profile.proxy_type !== 'noproxy' && profile.proxy_host) {
@@ -95,12 +96,13 @@ async function launchProfileElectron(profile, options = {}) {
       proxy_type: profile.proxy_type,
       proxy_host: profile.proxy_host,
       proxy_port: profile.proxy_port,
-      proxy_user: profile.proxy_user,
-      proxy_pass: profile.proxy_pass,
+      proxy_user: String(profile.proxy_user || '').trim(),
+      proxy_pass: String(profile.proxy_pass || ''),
     };
+    if (!proxyMeta.proxy_user && !proxyMeta.proxy_pass) {
+      appendLog(logFile, `警告：环境 ${profile.id} 代理 ${proxyMeta.proxy_host}:${proxyMeta.proxy_port} 未配置账密，SOCKS 认证代理将失败`);
+    }
   }
-
-  const logFile = envLogFile(profile.id);
   const softwareRender = Boolean(wantSoftwareRender());
   const remoteSession = isRemoteSession();
   const profileId = String(profile.id);

@@ -130,9 +130,14 @@ async function launchProfileInProcess(profile, options = {}) {
 
   const bindContentEvents = (wc) => {
     if (!wc) return;
+    let pageLoadedOk = false;
     wc.on('did-fail-load', (event, code, desc, url, isMainFrame) => {
       if (!isMainFrame || code === -3) return;
       if (!url || url.startsWith('file:') || url.startsWith('data:')) return;
+      if (pageLoadedOk) {
+        appendEnvLog(id, `导航失败（页面已加载过，不切换诊断页） code=${code} url=${url}`);
+        return;
+      }
       if (settled) return;
       settled = true;
       appendEnvLog(id, `did-fail-load code=${code} url=${url} ${desc}`);
@@ -166,6 +171,7 @@ async function launchProfileInProcess(profile, options = {}) {
     wc.on('did-finish-load', () => {
       const href = wc.getURL();
       if (href.startsWith('file:') || href.startsWith('data:')) return;
+      pageLoadedOk = true;
       clearTimeout(hardTimeout);
       if (inspected || settled) return;
       inspected = true;

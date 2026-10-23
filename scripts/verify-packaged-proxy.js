@@ -29,8 +29,9 @@ const proxyAuth = path.join(tmp, 'src', 'browser', 'proxy-auth.js');
 const text = fs.readFileSync(proxyAuth, 'utf8');
 const checks = [
   ['handleSocksClient', /function handleSocksClient/],
-  ['PROXY_BRIDGE_REV', /PROXY_BRIDGE_REV\s*=\s*['"]6['"]/],
-  ['handshake slot release', /releaseSlot\(\);\s*\n\s*client\.resume\(\)/],
+  ['PROXY_BRIDGE_REV', /PROXY_BRIDGE_REV\s*=\s*['"]8['"]/],
+  ['tunnel slot queue', /acquireTunnelSlot/],
+  ['max tunnels config', /MAX_ACTIVE_TUNNELS/],
   ['socks5:// local rules', /socks5:\/\/127\.0\.0\.1/],
   ['no stale proxy.proxyArg in launcher', () => {
     const launcherPath = path.join(tmp, 'src', 'browser', 'electron-launcher.js');

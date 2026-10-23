@@ -4,6 +4,7 @@
 const { BrowserWindow, BrowserView, ipcMain } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
+const { loadAppIcon, applyWindowIcon } = require('./app-icon');
 
 const TOOLBAR_H = 92;
 const SHELL_HTML = path.join(__dirname, '../../ui/env-shell.html');
@@ -82,12 +83,14 @@ async function createEnvChrome(opts) {
   let nextTabId = 1;
   const ipcPrefix = `env-chrome-${profileId}-${Date.now()}`;
 
+  const appIcon = loadAppIcon();
   const win = new BrowserWindow({
     width,
     height: height + TOOLBAR_H,
     show: !headless,
     paintWhenInitiallyHidden: true,
     title: windowTitle,
+    icon: appIcon || undefined,
     autoHideMenuBar: true,
     backgroundColor: '#e8eaed',
     webPreferences: {
@@ -98,6 +101,7 @@ async function createEnvChrome(opts) {
       additionalArguments: [`--env-chrome-ipc=${ipcPrefix}`],
     },
   });
+  applyWindowIcon(win);
   try { win.setMenuBarVisibility(false); } catch { /* */ }
 
   function pushHistory(url, title) {

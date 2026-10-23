@@ -1,6 +1,6 @@
 {
   "name": "tkswarm-browses",
-  "version": "1.0.22",
+  "version": "1.0.24",
   "description": "第一页自研浏览器 — Bit Browser API compatible local server",
   "main": "electron/main.js",
   "author": "TkSwarm",
@@ -19,7 +19,12 @@
     "smoke:lifecycle": "node scripts/smoke-lifecycle.js",
     "smoke:upsert": "node scripts/smoke-upsert.js",
     "smoke:all": "node scripts/smoke-test.js && node scripts/smoke-lifecycle.js && node scripts/smoke-upsert.js",
-    "verify:packaged": "node scripts/verify-packaged-proxy.js"
+    "verify:packaged": "node scripts/verify-packaged-proxy.js",
+    "icons": "node scripts/generate-icons.js",
+    "predist": "npm run icons",
+    "predist:win": "npm run icons",
+    "predist:win:portable": "npm run icons",
+    "predist:mac": "npm run icons"
   },
   "dependencies": {
     "express": "^4.22.3",
@@ -28,7 +33,9 @@
   "devDependencies": {
     "electron": "^33.3.1",
     "electron-builder": "^25.1.8",
-    "playwright-core": "^1.50.1"
+    "playwright-core": "^1.50.1",
+    "png-to-ico": "^3.0.2",
+    "sharp": "^0.35.5"
   },
   "build": {
     "appId": "com.tkswarm.browses",
@@ -49,9 +56,23 @@
       "src/**/*",
       "ui/**/*",
       "scripts/**/*",
+      "build/icon.png",
+      "build/icon.ico",
       "package.json"
     ],
+    "extraResources": [
+      {
+        "from": "build/icon.ico",
+        "to": "icons/icon.ico"
+      },
+      {
+        "from": "build/icon.png",
+        "to": "icons/icon.png"
+      }
+    ],
+    "icon": "build/icon.png",
     "win": {
+      "icon": "build/icon.ico",
       "target": [
         {
           "target": "nsis",
@@ -81,6 +102,7 @@
       "shortcutName": "第一页自研浏览器"
     },
     "mac": {
+      "icon": "build/icon.png",
       "target": [
         {
           "target": "dmg",

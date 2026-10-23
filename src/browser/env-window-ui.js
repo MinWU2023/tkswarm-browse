@@ -64,7 +64,7 @@ function buildDiagnosticHtml(profileId, opts = {}) {
   <table>${rows}</table>
   <ol class="tips">
     <li>先看上面「代理自检」：<b>TikTok 不通 + 中性站通</b> = 代理封了 TikTok 出口（换支持 TikTok 的节点）；<b>两个都不通</b> = 代理服务器本身连不上（过期 / IP 被封 / 端口错）；<b>提示认证被拒</b> = 代理账密填错。</li>
-    <li>若错误含 <code>ERR_SOCKS_CONNECTION_FAILED</code>：在 Node 账号页检查代理地址/端口/账密，或先用「测试环境窗」验证直连是否正常。</li>
+    <li>若错误含 <code>ERR_SOCKS_CONNECTION_FAILED</code>：常见是<b>代理套餐并发太低</b>（日志里 5 条同时超时即典型）。看日志「并发探测 x/6」；可设环境变量 <code>TKSWARM_PROXY_MAX_TUNNELS=5</code> 与套餐一致，或换更高并发节点。</li>
     <li>检查账号代理是否可用，或临时改为直连测试。</li>
     <li>完全退出客户端后重开（托盘也要退出）。</li>
     <li>把 <code>data/logs/env-${escHtml(profileId)}.log</code> 发给技术支持。</li>
